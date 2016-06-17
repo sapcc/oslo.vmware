@@ -140,7 +140,8 @@ class LocalFileAdapter(requests.adapters.HTTPAdapter):
 
 
 class RequestsTransport(transport.Transport):
-    def __init__(self, cacert=None, insecure=True, pool_maxsize=10):
+    def __init__(self, cacert=None, insecure=True, pool_maxsize=10,
+                 connection_timeout=None):
         transport.Transport.__init__(self)
         # insecure flag is used only if cacert is not
         # specified.
@@ -151,6 +152,7 @@ class RequestsTransport(transport.Transport):
         self.session.mount('https://', requests.adapters.HTTPAdapter(
             pool_connections=pool_maxsize, pool_maxsize=pool_maxsize))
         self.cookiejar = self.session.cookies
+        self._connection_timeout = connection_timeout
 
     def open(self, request):
         resp = self.session.get(request.url, verify=self.verify)
@@ -160,7 +162,8 @@ class RequestsTransport(transport.Transport):
         resp = self.session.post(request.url,
                                  data=request.message,
                                  headers=request.headers,
-                                 verify=self.verify)
+                                 verify=self.verify,
+                                 timeout=self._connection_timeout)
         return transport.Reply(resp.status_code, resp.headers, resp.content)
 
 
@@ -196,12 +199,16 @@ class Service(object):
     """
 
     def __init__(self, wsdl_url=None, soap_url=None,
-                 cacert=None, insecure=True, pool_maxsize=10):
+                 cacert=None, insecure=True, pool_maxsize=10,
+                 connection_timeout=None):
         self.wsdl_url = wsdl_url
         self.soap_url = soap_url
         LOG.debug("Creating suds client with soap_url='%s' and wsdl_url='%s'",
                   self.soap_url, self.wsdl_url)
-        transport = RequestsTransport(cacert, insecure, pool_maxsize)
+        transport = RequestsTransport(cacert=cacert,
+                                      insecure=insecure,
+                                      pool_maxsize=pool_maxsize,
+                                      connection_timeout=connection_timeout)
         self.client = client.Client(self.wsdl_url,
                                     transport=transport,
                                     location=self.soap_url,
