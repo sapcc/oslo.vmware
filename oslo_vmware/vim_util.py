@@ -22,6 +22,11 @@ import logging
 from oslo_utils import timeutils
 from suds import sudsobject
 
+try:
+    import suds.eventlet_patch
+except ImportError:
+    pass
+
 from oslo_vmware._i18n import _LW
 
 
