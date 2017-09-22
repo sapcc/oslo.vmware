@@ -22,6 +22,12 @@ import logging
 from oslo_utils import timeutils
 from suds import sudsobject
 
+try:
+    import suds.eventlet_patch
+except ImportError:
+    pass
+
+
 LOG = logging.getLogger(__name__)
 
 
