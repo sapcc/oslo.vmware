@@ -27,6 +27,12 @@ import requests
 import six
 import six.moves.http_client as httplib
 import suds
+
+try:
+    import suds.eventlet_patch
+except ImportError:
+    pass
+
 from suds import cache
 from suds import client
 from suds import plugin
