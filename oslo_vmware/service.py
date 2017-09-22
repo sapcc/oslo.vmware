@@ -26,6 +26,12 @@ from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import requests
 import suds
+
+try:
+    import suds.eventlet_patch
+except ImportError:
+    pass
+
 from suds import cache
 from suds import client
 from suds import plugin
