@@ -41,7 +41,8 @@ class Pbm(service.Service):
     """Service class that provides access to the Storage Policy API."""
 
     def __init__(self, protocol='https', host='localhost', port=443,
-                 wsdl_url=None, cacert=None, insecure=True, pool_maxsize=10):
+                 wsdl_url=None, cacert=None, insecure=True, pool_maxsize=10,
+                 maximum_xml_elements=service.MAXIMUM_XML_ELEMENTS):
         """Constructs a PBM service client object.
 
         :param protocol: http or https
@@ -58,7 +59,7 @@ class Pbm(service.Service):
         base_url = service.Service.build_base_url(protocol, host, port)
         soap_url = base_url + '/pbm'
         super(Pbm, self).__init__(wsdl_url, soap_url, cacert, insecure,
-                                  pool_maxsize)
+                                  pool_maxsize, maximum_xml_elements=maximum_xml_elements)
 
     def set_soap_cookie(self, cookie):
         """Set the specified vCenter session cookie in the SOAP header

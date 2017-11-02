@@ -20,7 +20,8 @@ class Vim(service.Service):
     """Service class that provides access to the VIM API."""
 
     def __init__(self, protocol='https', host='localhost', port=None,
-                 wsdl_url=None, cacert=None, insecure=True, pool_maxsize=10):
+                 wsdl_url=None, cacert=None, insecure=True, pool_maxsize=10,
+                 maximum_xml_elements=service.MAXIMUM_XML_ELEMENTS):
         """Constructs a VIM service client object.
 
         :param protocol: http or https
@@ -41,7 +42,7 @@ class Vim(service.Service):
         if wsdl_url is None:
             wsdl_url = soap_url + '/vimService.wsdl'
         super(Vim, self).__init__(wsdl_url, soap_url, cacert, insecure,
-                                  pool_maxsize)
+                                  pool_maxsize, maximum_xml_elements=maximum_xml_elements)
 
     def retrieve_service_content(self):
         return self.RetrieveServiceContent(service.SERVICE_INSTANCE)

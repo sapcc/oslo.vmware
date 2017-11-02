@@ -45,6 +45,7 @@ CACHE_TIMEOUT = 60 * 60  # One hour cache timeout
 ADDRESS_IN_USE_ERROR = 'Address already in use'
 CONN_ABORT_ERROR = 'Software caused connection abort'
 RESP_NOT_XML_ERROR = 'Response is "text/html", not "text/xml"'
+MAXIMUM_XML_ELEMENTS = 500000
 
 SERVICE_INSTANCE = 'ServiceInstance'
 
@@ -53,8 +54,11 @@ LOG = logging.getLogger(__name__)
 
 class ServiceMessagePlugin(plugin.MessagePlugin):
     """Suds plug-in handling some special cases while calling VI SDK."""
+    def __init__(self, maximum_xml_elements=None):
+        self._maximum_xml_elements = maximum_xml_elements or MAXIMUM_XML_ELEMENTS
+        self._count = 0
 
-    def add_attribute_for_value(self, node):
+    def add_attribute_for_value_and_count_elements(self, node):
         """Helper to handle AnyType.
 
         Suds does not handle AnyType properly. But VI SDK requires type
@@ -62,6 +66,7 @@ class ServiceMessagePlugin(plugin.MessagePlugin):
 
         :param node: XML value node
         """
+        self._count += 1
         if node.name == 'value' or node.name == 'val':
             node.set('xsi:type', 'xsd:string')
 
@@ -77,7 +82,12 @@ class ServiceMessagePlugin(plugin.MessagePlugin):
         # VI SDK throws server errors if optional SOAP nodes are sent
         # without values; e.g., <test/> as opposed to <test>test</test>.
         context.envelope.prune()
-        context.envelope.walk(self.add_attribute_for_value)
+        self._count = 0
+        context.envelope.walk(self.add_attribute_for_value_and_count_elements)
+        if self._count > self._maximum_xml_elements:
+            raise exceptions.VMwareDriverException(
+                    _("too many elements got %d, limit is %d.") % (self._count, self._maximum_xml_elements), details={'context': context})
+        LOG.debug("Request with %d elements" % self._count)
 
 
 class Response(six.BytesIO):
@@ -194,7 +204,7 @@ class Service(object):
     """
 
     def __init__(self, wsdl_url=None, soap_url=None,
-                 cacert=None, insecure=True, pool_maxsize=10):
+                 cacert=None, insecure=True, pool_maxsize=10, maximum_xml_elements=MAXIMUM_XML_ELEMENTS):
         self.wsdl_url = wsdl_url
         self.soap_url = soap_url
         LOG.debug("Creating suds client with soap_url='%s' and wsdl_url='%s'",
@@ -203,7 +213,7 @@ class Service(object):
         self.client = client.Client(self.wsdl_url,
                                     transport=transport,
                                     location=self.soap_url,
-                                    plugins=[ServiceMessagePlugin()],
+                                    plugins=[ServiceMessagePlugin(maximum_xml_elements=maximum_xml_elements)],
                                     cache=_CACHE)
         self._service_content = None
 
