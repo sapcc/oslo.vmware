@@ -307,7 +307,7 @@ def translate_fault(localized_method_fault, excep_msg=None):
         if fault_class:
             ex = fault_class(excep_msg)
         else:
-            ex = exceptions.VimFaultException([name], excep_msg)
+            ex = VimFaultException([name], excep_msg)
     except Exception as e:
         LOG.debug("Unexpected exception thrown (%s) while translating fault (%s) with message: %s.",
                   e, localized_method_fault, excep_msg)
