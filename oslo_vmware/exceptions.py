@@ -303,7 +303,8 @@ def translate_fault(localized_method_fault, excep_msg=None):
     try:
         if not excep_msg:
             excep_msg = six.text_type(localized_method_fault.localizedMessage)
-        fault_class = get_fault_class(localized_method_fault.fault.__class__.__name__)
+        name=localized_method_fault.fault.__class__.__name__
+        fault_class=get_fault_class(name)
         if fault_class:
             ex = fault_class(excep_msg)
         else:
