@@ -80,6 +80,46 @@ class ServiceMessagePlugin(plugin.MessagePlugin):
         context.envelope.walk(self.add_attribute_for_value)
 
 
+class ServiceVersionDiscoveryPlugin(plugin.DocumentPlugin):
+    """Suds plug-in handling some special cases while calling VI SDK."""
+
+    def __init__(self, transport):
+        self._transport = transport
+
+    def parsed(self, context):
+        if self._transport.api_version:
+            return
+
+        node = context.document
+        if node.qname() != "definitions":
+            return
+        binding = node.getChild("binding")
+        if not binding:
+            return
+
+        latest_version = (0, 0)
+        for operation in binding.getChildren("operation"):
+            soapop = operation.getChild("soap:operation")
+            if soapop is None:
+                continue
+            action = soapop.get("soapAction")
+            if action is None:
+                continue
+            try:
+                urn, suffix = action.split('/')
+                if urn != "urn:vim25":
+                    continue
+                major, minor = suffix.split('.')
+                version = (int(major), int(minor))
+                if latest_version < version:
+                    latest_version = version
+            except ValueError:
+                # In case any of the split operations fail (so we do not have a proper version string)
+                pass
+        if latest_version > (0,0):
+            self._transport.api_version = "{}.{}".format(*version)
+
+
 class Response(six.BytesIO):
     """Response with an input stream as source."""
 
@@ -149,9 +189,21 @@ class RequestsTransport(transport.Transport):
         self.session.mount('file:///',
                            LocalFileAdapter(pool_maxsize=pool_maxsize))
         self.cookiejar = self.session.cookies
+        self.api_version = None
 
     def open(self, request):
-        resp = self.session.get(request.url, verify=self.verify)
+        resp = None
+        if self.api_version:
+            try:
+                _, file_name = request.url.rsplit('/', 1)
+                local = "file://" + os.path.join(os.path.dirname(vim_util.__file__), 'wsdl', self.api_version, file_name)
+                resp = self.session.get(local)
+            except IOError:
+                pass
+
+        if not resp:
+            resp = self.session.get(request.url, verify=self.verify)
+
         return six.StringIO(resp.content)
 
     def send(self, request):
@@ -203,7 +255,7 @@ class Service(object):
         self.client = client.Client(self.wsdl_url,
                                     transport=transport,
                                     location=self.soap_url,
-                                    plugins=[ServiceMessagePlugin()],
+                                    plugins=[ServiceMessagePlugin(), ServiceVersionDiscoveryPlugin(transport)],
                                     cache=_CACHE)
         self._service_content = None
 
