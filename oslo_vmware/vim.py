@@ -21,7 +21,8 @@ class Vim(service.Service):
 
     def __init__(self, protocol='https', host='localhost', port=None,
                  wsdl_url=None, cacert=None, insecure=True, pool_maxsize=10,
-                 connection_timeout=None, op_id_prefix='oslo.vmware'):
+                 connection_timeout=None, op_id_prefix='oslo.vmware',
+                 pool_block=False):
         """Constructs a VIM service client object.
 
         :param protocol: http or https
@@ -46,7 +47,7 @@ class Vim(service.Service):
             wsdl_url = soap_url + '/vimService.wsdl'
         super(Vim, self).__init__(wsdl_url, soap_url, cacert, insecure,
                                   pool_maxsize, connection_timeout,
-                                  op_id_prefix)
+                                  op_id_prefix, pool_block)
 
     def retrieve_service_content(self):
         return self.RetrieveServiceContent(service.SERVICE_INSTANCE)
