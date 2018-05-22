@@ -40,7 +40,8 @@ class Pbm(service.Service):
 
     def __init__(self, protocol='https', host='localhost', port=443,
                  wsdl_url=None, cacert=None, insecure=True, pool_maxsize=10,
-                 connection_timeout=None, op_id_prefix='oslo.vmware'):
+                 connection_timeout=None, op_id_prefix='oslo.vmware',
+                 pool_block=False):
         """Constructs a PBM service client object.
 
         :param protocol: http or https
@@ -61,7 +62,7 @@ class Pbm(service.Service):
         soap_url = base_url + '/pbm'
         super(Pbm, self).__init__(wsdl_url, soap_url, cacert, insecure,
                                   pool_maxsize, connection_timeout,
-                                  op_id_prefix)
+                                  op_id_prefix, pool_block)
 
     def set_soap_cookie(self, cookie):
         """Set the specified vCenter session cookie in the SOAP header
