@@ -139,7 +139,8 @@ class VMwareAPISession(object):
                  api_retry_count, task_poll_interval, scheme='https',
                  create_session=True, wsdl_loc=None, pbm_wsdl_loc=None,
                  port=443, cacert=None, insecure=True, pool_size=10,
-                 connection_timeout=None, op_id_prefix='oslo.vmware'):
+                 connection_timeout=None, op_id_prefix='oslo.vmware',
+                 pool_block=False):
         """Initializes the API session with given parameters.
 
         :param host: ESX/VC server IP address or host name
@@ -164,6 +165,8 @@ class VMwareAPISession(object):
         :param connection_timeout: Maximum time in seconds to wait for peer to
                                    respond.
         :param op_id_prefix: String prefix for the operation ID.
+        :param pool_block: Whether the connection pool should block for
+                           connections or create new ones
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException
         """
@@ -185,6 +188,7 @@ class VMwareAPISession(object):
         self._pool_size = pool_size
         self._connection_timeout = connection_timeout
         self._op_id_prefix = op_id_prefix
+        self._pool_block = pool_block
         if create_session:
             self._create_session()
 
@@ -204,7 +208,8 @@ class VMwareAPISession(object):
                                 insecure=self._insecure,
                                 pool_maxsize=self._pool_size,
                                 connection_timeout=self._connection_timeout,
-                                op_id_prefix=self._op_id_prefix)
+                                op_id_prefix=self._op_id_prefix,
+                                pool_block=self._pool_block)
         return self._vim
 
     @property
@@ -218,7 +223,8 @@ class VMwareAPISession(object):
                                 insecure=self._insecure,
                                 pool_maxsize=self._pool_size,
                                 connection_timeout=self._connection_timeout,
-                                op_id_prefix=self._op_id_prefix)
+                                op_id_prefix=self._op_id_prefix,
+                                pool_block=self._pool_block)
             if self._session_id:
                 # To handle the case where pbm property is accessed after
                 # session creation. If pbm property is accessed before session
