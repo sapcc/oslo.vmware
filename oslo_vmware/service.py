@@ -163,7 +163,7 @@ class LocalFileAdapter(requests.adapters.HTTPAdapter):
 
 class RequestsTransport(transport.Transport):
     def __init__(self, cacert=None, insecure=True, pool_maxsize=10,
-                 connection_timeout=None):
+                 connection_timeout=None, pool_block=False):
         transport.Transport.__init__(self)
         # insecure flag is used only if cacert is not
         # specified.
@@ -172,7 +172,8 @@ class RequestsTransport(transport.Transport):
         self.session.mount('file:///',
                            LocalFileAdapter(pool_maxsize=pool_maxsize))
         self.session.mount('https://', requests.adapters.HTTPAdapter(
-            pool_connections=pool_maxsize, pool_maxsize=pool_maxsize))
+            pool_connections=pool_maxsize, pool_maxsize=pool_maxsize,
+            pool_block=pool_block))
         self.cookiejar = self.session.cookies
         self._connection_timeout = connection_timeout
 
@@ -222,7 +223,8 @@ class Service(object):
 
     def __init__(self, wsdl_url=None, soap_url=None,
                  cacert=None, insecure=True, pool_maxsize=10,
-                 connection_timeout=None, op_id_prefix='oslo.vmware'):
+                 connection_timeout=None, op_id_prefix='oslo.vmware',
+                 pool_block=False):
         self.wsdl_url = wsdl_url
         self.soap_url = soap_url
         self.op_id_prefix = op_id_prefix
@@ -231,7 +233,8 @@ class Service(object):
         transport = RequestsTransport(cacert=cacert,
                                       insecure=insecure,
                                       pool_maxsize=pool_maxsize,
-                                      connection_timeout=connection_timeout)
+                                      connection_timeout=connection_timeout,
+                                      pool_block=pool_block)
         self.client = client.Client(self.wsdl_url,
                                     transport=transport,
                                     location=self.soap_url,
