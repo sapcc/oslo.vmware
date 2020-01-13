@@ -32,6 +32,7 @@ import urllib.parse as urlparse
 from urllib3 import connection as httplib
 
 from oslo_vmware._i18n import _
+from oslo_vmware.common import loopingcall
 from oslo_vmware import exceptions
 from oslo_vmware import vim_util
 
@@ -40,7 +41,6 @@ LOG = logging.getLogger(__name__)
 
 MIN_PROGRESS_DIFF_TO_LOG = 25
 MIN_UPDATE_INTERVAL = 60
-READ_CHUNKSIZE = 65536
 USER_AGENT = 'OpenStack-ESX-Adapter'
 
 
@@ -366,12 +366,19 @@ class FileReadHandle(FileHandle):
 class VmdkHandle(FileHandle):
     """VMDK handle based on HttpNfcLease."""
 
-    def __init__(self, session, lease, url, file_handle):
+    def __init__(self, session, lease, url, file_handle,
+                 update_progress=False):
         self._session = session
         self._lease = lease
         self._url = url
         self._last_logged_progress = 0
         self._last_progress_udpate = 0
+        self._updater = None
+
+        if update_progress:
+            self._updater = \
+                loopingcall.FixedIntervalLoopingCall(self.update_progress)
+            self._updater.start(interval=MIN_UPDATE_INTERVAL)
 
         super(VmdkHandle, self).__init__(file_handle)
 
@@ -420,6 +427,10 @@ class VmdkHandle(FileHandle):
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException, VimConnectionException
         """
+        if self._updater:
+            LOG.debug("Stopping the progress updater for lease %s.", self._url)
+            self._updater.stop()
+
         LOG.debug("Getting lease state for %s.", self._url)
 
         state = self._session.invoke_api(vim_util,
@@ -540,7 +551,7 @@ class VmdkWriteHandle(VmdkHandle):
     """
 
     def __init__(self, session, host, port, rp_ref, vm_folder_ref, import_spec,
-                 vmdk_size, http_method='PUT'):
+                 vmdk_size, http_method='PUT', update_progress=False):
         """Initializes the VMDK write handle with input parameters.
 
         :param session: valid API session to ESX/VC server
@@ -552,6 +563,8 @@ class VmdkWriteHandle(VmdkHandle):
         :param import_spec: import specification of the backing VM
         :param vmdk_size: size of the backing VM's VMDK file
         :param http_method: either PUT or POST
+        :param update_progress: maintain internal progress updater for the
+                                HttpNfcLease
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException, VimConnectionException,
                  ValueError
@@ -586,7 +599,8 @@ class VmdkWriteHandle(VmdkHandle):
                                                    overwrite=overwrite,
                                                    content_type=content_type,
                                                    ssl_thumbprint=thumbprint)
-        super(VmdkWriteHandle, self).__init__(session, lease, url, self._conn)
+        super(VmdkWriteHandle, self).__init__(session, lease, url,
+                                              self._conn, update_progress)
 
     def get_imported_vm(self):
         """"Get managed object reference of the VM created for import.
@@ -656,7 +670,7 @@ class VmdkReadHandle(VmdkHandle):
     """VMDK read handle based on HttpNfcLease."""
 
     def __init__(self, session, host, port, vm_ref, vmdk_path,
-                 vmdk_size):
+                 vmdk_size, update_progress=False):
         """Initializes the VMDK read handle with the given parameters.
 
         During the read (export) operation, the VMDK file is converted to a
@@ -670,6 +684,8 @@ class VmdkReadHandle(VmdkHandle):
                        is to be exported
         :param vmdk_path: path of the VMDK file to be exported
         :param vmdk_size: actual size of the VMDK file
+        :param update_progress: maintain internal progress updater for the
+                                HttpNfcLease
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException, VimConnectionException
         """
@@ -686,9 +702,10 @@ class VmdkReadHandle(VmdkHandle):
                                                   cookies=cookies,
                                                   ssl_thumbprint=thumbprint)
         super(VmdkReadHandle, self).__init__(session, lease, url,
-                                             self._conn.getresponse())
+                                             self._conn.getresponse(),
+                                             update_progress)
 
-    def read(self, chunk_size=READ_CHUNKSIZE):
+    def read(self, chunk_size):
         """Read a chunk of data from the VMDK file.
 
         :param chunk_size: size of read chunk
