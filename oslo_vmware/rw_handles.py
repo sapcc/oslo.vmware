@@ -35,6 +35,7 @@ from urllib3 import connection as httplib
 from oslo_vmware._i18n import _
 from oslo_vmware import exceptions
 from oslo_vmware import vim_util
+from oslo_vmware.common import loopingcall
 
 
 LOG = logging.getLogger(__name__)
@@ -458,7 +459,7 @@ class VmdkWriteHandle(VmdkHandle):
     """
 
     def __init__(self, session, host, port, rp_ref, vm_folder_ref, import_spec,
-                 vmdk_size, http_method='PUT'):
+                 vmdk_size, http_method='PUT', update_progress=False):
         """Initializes the VMDK write handle with input parameters.
 
         :param session: valid API session to ESX/VC server
@@ -504,6 +505,10 @@ class VmdkWriteHandle(VmdkHandle):
                                                    overwrite=overwrite,
                                                    content_type=content_type,
                                                    ssl_thumbprint=thumbprint)
+        if update_progress:
+            self._updater = \
+                loopingcall.FixedIntervalLoopingCall(self.update_progress)
+            self._updater.start(interval=MIN_UPDATE_INTERVAL)
         super(VmdkWriteHandle, self).__init__(session, lease, url, self._conn)
 
     def get_imported_vm(self):
@@ -543,6 +548,8 @@ class VmdkWriteHandle(VmdkHandle):
                  VimConnectionException
         """
         try:
+            if self._updater:
+                self._updater.stop()
             self._release_lease()
         except exceptions.VimException:
             LOG.warning("Error occurred while releasing the lease "
