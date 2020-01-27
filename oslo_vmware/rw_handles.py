@@ -42,7 +42,6 @@ LOG = logging.getLogger(__name__)
 
 MIN_PROGRESS_DIFF_TO_LOG = 25
 MIN_UPDATE_INTERVAL = 60
-READ_CHUNKSIZE = 65536
 USER_AGENT = 'OpenStack-ESX-Adapter'
 
 
@@ -609,7 +608,7 @@ class VmdkReadHandle(VmdkHandle):
         :raises: VimException
         """
         try:
-            data = self._file_handle.read(READ_CHUNKSIZE)
+            data = self._file_handle.read(chunk_size)
             self._bytes_read += len(data)
             return data
         except Exception as excep:
