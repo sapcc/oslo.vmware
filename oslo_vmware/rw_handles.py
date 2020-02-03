@@ -297,6 +297,7 @@ class VmdkHandle(FileHandle):
         self._url = url
         self._last_logged_progress = 0
         self._last_progress_udpate = 0
+        self._updater = None
 
         if update_progress:
             self._updater = \
