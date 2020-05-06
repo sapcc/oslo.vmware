@@ -668,3 +668,30 @@ def propset_dict(propset):
         return {}
 
     return {prop.name: prop.val for prop in propset}
+
+
+def is_vim_instance(obj, vim_type_name):
+    """Implement isinstance for zeep types
+
+    This walks through the XSD types of all the types `obj` extends and checks
+    if their name corresponds to the parameter `vim_type_name`.
+    """
+
+    def _obj_type_name(o):
+        return o._xsd_type.__class__.__name__
+
+    extension_type_names = set()
+    extension_types = [obj]
+    for t in extension_types:
+        name = _obj_type_name(t)
+
+        if name in extension_type_names:
+            continue
+        extension_type_names.add(name)
+
+        if name == vim_type_name:
+            return True
+
+        extension_types.extend(t._xsd_type._extension_types)
+
+    return False
