@@ -695,3 +695,8 @@ def is_vim_instance(obj, vim_type_name):
         extension_types.extend(t._xsd_type._extension_types)
 
     return False
+
+
+def serialize_object(obj):
+    """Convert an object and all attributes to OrderedDict"""
+    return zeep.helpers.serialize_object(obj)
