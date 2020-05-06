@@ -314,7 +314,7 @@ class VmdkReadHandleTest(base.TestCase):
                           100)
 
     def test_read(self):
-        chunk_size = rw_handles.READ_CHUNKSIZE
+        chunk_size = 65536
         session = self._create_mock_session()
         handle = rw_handles.VmdkReadHandle(session, '10.1.2.3', 443,
                                            'vm-1', '[ds] disk1.vmdk',
