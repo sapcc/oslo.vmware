@@ -21,10 +21,10 @@ import copy
 
 import mock
 from oslo_i18n import fixture as i18n_fixture
-import suds
 
 from oslo_vmware import exceptions
 from oslo_vmware.tests import base
+from oslo_vmware import service
 from oslo_vmware import vim
 
 
@@ -33,9 +33,9 @@ class VimTest(base.TestCase):
 
     def setUp(self):
         super(VimTest, self).setUp()
-        patcher = mock.patch('suds.client.Client')
+        patcher = mock.patch('oslo_vmware.service.CompatibilityZeepClient')
         self.addCleanup(patcher.stop)
-        self.SudsClientMock = patcher.start()
+        self.ClientMock = patcher.start()
         self.useFixture(i18n_fixture.ToggleLazy(True))
 
     @mock.patch.object(vim.Vim, '__getattr__', autospec=True)
@@ -46,7 +46,7 @@ class VimTest(base.TestCase):
         vim_obj.service_content
         getattr_mock.assert_called_once_with(vim_obj, 'RetrieveServiceContent')
         getattr_ret.assert_called_once_with('ServiceInstance')
-        self.assertEqual(self.SudsClientMock.return_value, vim_obj.client)
+        self.assertEqual(self.ClientMock.return_value, vim_obj.client)
         self.assertEqual(getattr_ret.return_value, vim_obj.service_content)
 
     def test_configure_non_default_host_port(self):
@@ -78,14 +78,14 @@ class VimTest(base.TestCase):
         self.assertEqual('https://www.example.com/sdk', vim_obj.soap_url)
 
 
-class VMwareSudsTest(base.TestCase):
+class VMwareZeepTest(base.TestCase):
     def setUp(self):
-        super(VMwareSudsTest, self).setUp()
+        super(VMwareZeepTest, self).setUp()
 
         def new_client_init(self, url, **kwargs):
             return
 
-        mock.patch.object(suds.client.Client,
+        mock.patch.object(service.CompatibilityZeepClient,
                           '__init__', new=new_client_init).start()
         self.addCleanup(mock.patch.stopall)
         self.vim = self._vim_create()

@@ -17,48 +17,95 @@ import mock
 import requests
 import six
 import six.moves.http_client as httplib
-import suds
+import zeep
 
 import ddt
+from lxml import etree
 from oslo_vmware import exceptions
 from oslo_vmware import service
 from oslo_vmware.tests import base
 from oslo_vmware import vim_util
 
 
+def load_xml(xml):
+    parser = etree.XMLParser(
+        remove_blank_text=True, remove_comments=True, resolve_entities=False
+    )
+    return etree.fromstring(xml.strip(), parser=parser)
+
+
 @ddt.ddt
-class ServiceMessagePluginTest(base.TestCase):
-    """Test class for ServiceMessagePlugin."""
+class AddAnyTypeTypeAttributePluginTest(base.TestCase):
+    """Test class for AddAnyTypeTypeAttributePlugin."""
 
     def setUp(self):
-        super(ServiceMessagePluginTest, self).setUp()
-        self.plugin = service.ServiceMessagePlugin()
+        super(AddAnyTypeTypeAttributePluginTest, self).setUp()
+        self.plugin = service.AddAnyTypeTypeAttributePlugin()
 
-    @ddt.data(('value', 'foo', 'string'), ('removeKey', '1', 'int'),
-              ('removeKey', 'foo', 'string'))
+    @ddt.data(('value', 'foo', 'string'),
+              ('removeKey', 1, 'int'),
+              ('removeKey', 'foo', 'string'),
+              ('flavor', 'foo', None))
     @ddt.unpack
-    def test_add_attribute_for_value(self, name, text, expected_xsd_type):
-        node = mock.Mock()
-        node.name = name
-        node.text = text
-        self.plugin.add_attribute_for_value(node)
-        node.set.assert_called_once_with('xsi:type',
-                                         'xsd:%s' % expected_xsd_type)
+    def test_add_attribute_for_value(self, name, value, xsd_type):
+        xml_str = '''
+            <document xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                <ns0:container xmlns:ns0="http://tests.python-zeep.org/">
+                    <ns0:{} {}>{}</ns0:{}>
+                </ns0:container>
+            </document>
+            '''
+        xml = load_xml(xml_str.format(name, '', value, name))
+        attr = 'xsi:type="xsd:{}"'.format(xsd_type) \
+               if xsd_type is not None else ''
+        xml_expected = load_xml(xml_str.format(name, attr, value, name))
 
-    def test_marshalled(self):
-        context = mock.Mock()
-        self.plugin.prune = mock.Mock()
-        self.plugin.marshalled(context)
-        self.plugin.prune.assert_called_once_with(context.envelope)
-        context.envelope.walk.assert_called_once_with(
-            self.plugin.add_attribute_for_value)
+        self.plugin._add_attribute_for_value(xml)
+        self.assertEqual(etree.tostring(xml), etree.tostring(xml_expected))
+
+
+@ddt.ddt
+class PruneEmptyNodesPluginTest(base.TestCase):
+    """Test class for PruneEmptyNodesPlugin."""
+
+    def setUp(self):
+        super(PruneEmptyNodesPluginTest, self).setUp()
+        self.plugin = service.PruneEmptyNodesPlugin()
+
+    @ddt.data(('<document></document>', True),
+              ('<document path="foo"></document>', False),
+              ('<document>foo</document>', False),
+              ('<document><child /></document>', False),
+              ('<document />', True),
+              ('<document foo="bar" />', False))
+    @ddt.unpack
+    def test_isempty(self, xml_str, should_be_empty):
+        xml = load_xml(xml_str)
+        self.assertEqual(self.plugin._isempty(xml), should_be_empty, xml_str)
+
+    @ddt.data(('<document><parent><child>foo</child><child2 />'
+               '</parent></document>',
+               '<document><parent><child>foo</child></parent></document>'),
+              ('<document>text<parent><child /></parent></document>',
+               '<document>text</document>'),
+              ('<envelope><child /></envelope>',
+               '<envelope/>'),
+              ('<envelope><parent><VirtualMachineEmptyProfileSpec /></parent>'
+               '<parent2 foo="bla"><child /></parent2></envelope>',
+               '<envelope><parent><VirtualMachineEmptyProfileSpec/></parent>'
+               '<parent2 foo="bla"/></envelope>'))
+    @ddt.unpack
+    def test_prune(self, xml_str, xml_str_expected):
+        xml = load_xml(xml_str)
+        self.plugin._prune(xml)
+        self.assertEqual(etree.tostring(xml), xml_str_expected)
 
 
 class ServiceTest(base.TestCase):
 
     def setUp(self):
         super(ServiceTest, self).setUp()
-        patcher = mock.patch('suds.client.Client')
+        patcher = mock.patch('oslo_vmware.service.CompatibilityZeepClient')
         self.addCleanup(patcher.stop)
         self.SudsClientMock = patcher.start()
 
@@ -124,23 +171,20 @@ class ServiceTest(base.TestCase):
         managed_object = 'VirtualMachine'
         fault_list = ['Fault']
 
-        doc = mock.Mock()
-
         def side_effect(mo, **kwargs):
-            self.assertEqual(managed_object, mo._type)
-            self.assertEqual(managed_object, mo.value)
-            fault = mock.Mock(faultstring="MyFault")
+            self.assertEqual(managed_object, vim_util.get_moref_type(mo))
+            self.assertEqual(managed_object, vim_util.get_moref_value(mo))
 
             fault_children = mock.Mock()
-            fault_children.name = "name"
-            fault_children.getText.return_value = "value"
+            fault_children.tag = "name"
+            fault_children.text = "value"
             child = mock.Mock()
             child.get.return_value = fault_list[0]
-            child.getChildren.return_value = [fault_children]
+            child.nsmap = {'xsi': ''}
+            child.getchildren.return_value = [fault_children]
             detail = mock.Mock()
-            detail.getChildren.return_value = [child]
-            doc.childAtPath.return_value = detail
-            raise suds.WebFault(fault, doc)
+            detail.getchildren.return_value = [child]
+            raise zeep.exceptions.Fault(message="MyFault", detail=detail)
 
         svc_obj = service.Service()
         service_mock = svc_obj.client.service
@@ -152,13 +196,11 @@ class ServiceTest(base.TestCase):
         self.assertEqual(fault_list, ex.fault_list)
         self.assertEqual({'name': 'value'}, ex.details)
         self.assertEqual("MyFault", ex.msg)
-        doc.childAtPath.assert_called_once_with('/detail')
 
     def test_request_handler_with_empty_web_fault_doc(self):
 
         def side_effect(mo, **kwargs):
-            fault = mock.Mock(faultstring="MyFault")
-            raise suds.WebFault(fault, None)
+            raise zeep.exceptions.Fault(message="MyFault")
 
         svc_obj = service.Service()
         service_mock = svc_obj.client.service
@@ -175,23 +217,20 @@ class ServiceTest(base.TestCase):
         managed_object = 'VirtualMachine'
         fault_list = ['Fault']
 
-        doc = mock.Mock()
-
         def side_effect(mo, **kwargs):
-            self.assertEqual(managed_object, mo._type)
-            self.assertEqual(managed_object, mo.value)
-            fault = mock.Mock(faultstring="MyFault")
+            self.assertEqual(managed_object, vim_util.get_moref_type(mo))
+            self.assertEqual(managed_object, vim_util.get_moref_value(mo))
 
             fault_children = mock.Mock()
-            fault_children.name = "name"
-            fault_children.getText.return_value = "value"
+            fault_children.tag = "name"
+            fault_children.text = "value"
             child = mock.Mock()
             child.get.return_value = fault_list[0]
-            child.getChildren.return_value = [fault_children]
+            child.nsmap = {'xsi': ''}
+            child.getchildren.return_value = [fault_children]
             detail = mock.Mock()
-            detail.getChildren.return_value = [child]
-            doc.childAtPath.side_effect = [None, detail]
-            raise suds.WebFault(fault, doc)
+            detail.getchildren.return_value = [child]
+            raise zeep.exceptions.Fault(message="MyFault", detail=detail)
 
         svc_obj = service.Service()
         service_mock = svc_obj.client.service
@@ -203,29 +242,24 @@ class ServiceTest(base.TestCase):
         self.assertEqual(fault_list, ex.fault_list)
         self.assertEqual({'name': 'value'}, ex.details)
         self.assertEqual("MyFault", ex.msg)
-        exp_calls = [mock.call('/detail'),
-                     mock.call('/Envelope/Body/Fault/detail')]
-        self.assertEqual(exp_calls, doc.childAtPath.call_args_list)
 
     def test_request_handler_with_security_error(self):
         managed_object = 'VirtualMachine'
-        doc = mock.Mock()
 
         def side_effect(mo, **kwargs):
-            self.assertEqual(managed_object, mo._type)
-            self.assertEqual(managed_object, mo.value)
-            fault = mock.Mock(faultstring="MyFault")
+            self.assertEqual(managed_object, vim_util.get_moref_type(mo))
+            self.assertEqual(managed_object, vim_util.get_moref_value(mo))
 
             fault_children = mock.Mock()
-            fault_children.name = "name"
-            fault_children.getText.return_value = "value"
+            fault_children.tag = "name"
+            fault_children.text = "value"
             child = mock.Mock()
             child.get.return_value = 'vim25:SecurityError'
-            child.getChildren.return_value = [fault_children]
+            child.nsmap = {'xsi': ''}
+            child.getchildren.return_value = [fault_children]
             detail = mock.Mock()
-            detail.getChildren.return_value = [child]
-            doc.childAtPath.return_value = detail
-            raise suds.WebFault(fault, doc)
+            detail.getchildren.return_value = [child]
+            raise zeep.exceptions.Fault(message="MyFault", detail=detail)
 
         svc_obj = service.Service()
         service_mock = svc_obj.client.service
@@ -237,7 +271,6 @@ class ServiceTest(base.TestCase):
         self.assertEqual([exceptions.NOT_AUTHENTICATED], ex.fault_list)
         self.assertEqual({'name': 'value'}, ex.details)
         self.assertEqual("MyFault", ex.msg)
-        doc.childAtPath.assert_called_once_with('/detail')
 
     def test_request_handler_with_attribute_error(self):
         managed_object = 'VirtualMachine'
@@ -373,7 +406,7 @@ class ServiceTest(base.TestCase):
         cookie = mock.Mock()
         cookie.name = 'vmware_soap_session'
         cookie.value = cookie_value
-        svc_obj.client.options.transport.cookiejar = [cookie]
+        svc_obj.client.cookiejar = [cookie]
         self.assertEqual(cookie_value, svc_obj.get_http_cookie())
 
     def test_get_session_cookie_with_no_cookie(self):
@@ -381,7 +414,7 @@ class ServiceTest(base.TestCase):
         cookie = mock.Mock()
         cookie.name = 'cookie'
         cookie.value = 'xyz'
-        svc_obj.client.options.transport.cookiejar = [cookie]
+        svc_obj.client.cookiejar = [cookie]
         self.assertIsNone(svc_obj.get_http_cookie())
 
     def test_set_soap_headers(self):
@@ -409,74 +442,22 @@ class ServiceTest(base.TestCase):
         svc_obj._set_soap_headers('fira-12345')
 
 
-class MemoryCacheTest(base.TestCase):
-    """Test class for MemoryCache."""
+class TransportTest(base.TestCase):
+    """Tests for LocalFileAdapter and Transport parameters."""
+    def setUp(self):
+        super(TransportTest, self).setUp()
 
-    def test_get_set(self):
-        cache = service.MemoryCache()
-        cache.put('key1', 'value1')
-        cache.put('key2', 'value2')
-        self.assertEqual('value1', cache.get('key1'))
-        self.assertEqual('value2', cache.get('key2'))
-        self.assertIsNone(cache.get('key3'))
+        def new_client_init(self, url, **kwargs):
+            self.transport = kwargs['transport']
+            return
 
-    @mock.patch('suds.reader.DefinitionsReader.open')
-    @mock.patch('suds.reader.DocumentReader.download', create=True)
-    def test_shared_cache(self, mock_reader, mock_open):
-        cache1 = service.Service().client.options.cache
-        cache2 = service.Service().client.options.cache
-        self.assertIs(cache1, cache2)
-
-    @mock.patch('oslo_utils.timeutils.utcnow_ts')
-    def test_cache_timeout(self, mock_utcnow_ts):
-        mock_utcnow_ts.side_effect = [100, 125, 150, 175, 195, 200, 225]
-
-        cache = service.MemoryCache()
-        cache.put('key1', 'value1', 10)
-        cache.put('key2', 'value2', 75)
-        cache.put('key3', 'value3', 100)
-
-        self.assertIsNone(cache.get('key1'))
-        self.assertEqual('value2', cache.get('key2'))
-        self.assertIsNone(cache.get('key2'))
-        self.assertEqual('value3', cache.get('key3'))
-
-
-class RequestsTransportTest(base.TestCase):
-    """Tests for RequestsTransport."""
-
-    def test_open(self):
-        transport = service.RequestsTransport()
-
-        data = b"Hello World"
-        resp = mock.Mock(content=data)
-        transport.session.get = mock.Mock(return_value=resp)
-
-        request = mock.Mock(url=mock.sentinel.url)
-        self.assertEqual(data,
-                         transport.open(request).getvalue())
-        transport.session.get.assert_called_once_with(mock.sentinel.url,
-                                                      verify=transport.verify)
-
-    def test_send(self):
-        transport = service.RequestsTransport()
-
-        resp = mock.Mock(status_code=mock.sentinel.status_code,
-                         headers=mock.sentinel.headers,
-                         content=mock.sentinel.content)
-        transport.session.post = mock.Mock(return_value=resp)
-
-        request = mock.Mock(url=mock.sentinel.url,
-                            message=mock.sentinel.message,
-                            headers=mock.sentinel.req_headers)
-        reply = transport.send(request)
-
-        self.assertEqual(mock.sentinel.status_code, reply.code)
-        self.assertEqual(mock.sentinel.headers, reply.headers)
-        self.assertEqual(mock.sentinel.content, reply.message)
+        mock.patch.object(service.CompatibilityZeepClient,
+                          '__init__', new=new_client_init).start()
+        self.addCleanup(mock.patch.stopall)
 
     def test_set_conn_pool_size(self):
-        transport = service.RequestsTransport(pool_maxsize=100)
+        transport = service.Service(pool_maxsize=100).client.transport
+
         local_file_adapter = transport.session.adapters['file:///']
         self.assertEqual(100, local_file_adapter._pool_connections)
         self.assertEqual(100, local_file_adapter._pool_maxsize)
@@ -486,7 +467,7 @@ class RequestsTransportTest(base.TestCase):
 
     @mock.patch('os.path.getsize')
     def test_send_with_local_file_url(self, get_size_mock):
-        transport = service.RequestsTransport()
+        transport = service.Service(pool_maxsize=100).client.transport
 
         url = 'file:///foo'
         request = requests.PreparedRequest()
@@ -522,16 +503,13 @@ class RequestsTransportTest(base.TestCase):
             self.assertEqual(data, resp.content)
 
     def test_send_with_connection_timeout(self):
-        transport = service.RequestsTransport(connection_timeout=120)
+        transport = service.Service(connection_timeout=120).client.transport
 
-        request = mock.Mock(url=mock.sentinel.url,
-                            message=mock.sentinel.message,
-                            headers=mock.sentinel.req_headers)
         with mock.patch.object(transport.session, "post") as mock_post:
-            transport.send(request)
+            transport.post(mock.sentinel.url, mock.sentinel.message,
+                           mock.sentinel.req_headers)
             mock_post.assert_called_once_with(
                 mock.sentinel.url,
                 data=mock.sentinel.message,
                 headers=mock.sentinel.req_headers,
-                timeout=120,
-                verify=transport.verify)
+                timeout=120)

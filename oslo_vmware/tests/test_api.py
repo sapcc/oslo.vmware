@@ -319,7 +319,7 @@ class VMwareAPISessionTest(base.TestCase):
         api_session = self._create_api_session(True)
         fault_string = 'Invalid property.'
         fault_list = [exceptions.INVALID_PROPERTY]
-        details = {u'name': suds.sax.text.Text(u'фира')}
+        details = {u'name': u'фира'}
 
         module = mock.Mock()
         module.api.side_effect = exceptions.VimFaultException(fault_list,

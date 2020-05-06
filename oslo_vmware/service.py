@@ -21,23 +21,14 @@ import logging
 import os
 
 import netaddr
-from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import requests
 import six
 import six.moves.http_client as httplib
-import suds
 
-try:
-    import suds.eventlet_patch
-except ImportError:
-    pass
-
-from suds import cache
-from suds import client
-from suds import plugin
-import suds.sax.element as element
-from suds import transport
+from lxml import etree
+import zeep
+from zeep.cache import InMemoryCache
 
 from oslo_vmware._i18n import _
 from oslo_vmware import exceptions
@@ -53,53 +44,68 @@ SERVICE_INSTANCE = 'ServiceInstance'
 LOG = logging.getLogger(__name__)
 
 
-class ServiceMessagePlugin(plugin.MessagePlugin):
-    """Suds plug-in handling some special cases while calling VI SDK."""
+class PruneEmptyNodesPlugin(zeep.Plugin):
 
     # list of XML elements which are allowed to be empty
     EMPTY_ELEMENTS = ["VirtualMachineEmptyProfileSpec"]
 
-    def add_attribute_for_value(self, node):
-        """Helper to handle AnyType.
+    def _isempty(self, el):
+        """Same implementation suds used to have"""
+        return el.text is None and not el.keys() and not len(el.getchildren())
 
-        Suds does not handle AnyType properly. But VI SDK requires type
-        attribute to be set when AnyType is used.
-
-        :param node: XML value node
-        """
-        if node.name == 'value' or node.name == 'val':
-            node.set('xsi:type', 'xsd:string')
-        # removeKey may be a 'int' or a 'string'
-        if node.name == 'removeKey':
-            try:
-                int(node.text)
-                node.set('xsi:type', 'xsd:int')
-            except (ValueError, TypeError):
-                node.set('xsi:type', 'xsd:string')
-
-    def prune(self, el):
+    def _prune(self, el):
         pruned = []
-        for c in el.children:
-            self.prune(c)
-            if c.isempty(False) and c.name not in self.EMPTY_ELEMENTS:
-                pruned.append(c)
+        for child in el:
+            self._prune(child)
+            if self._isempty(child):
+                tag_name = etree.QName(child.tag).localname
+                if tag_name not in self.EMPTY_ELEMENTS:
+                    pruned.append(child)
         for p in pruned:
-            el.children.remove(p)
+            el.remove(p)
 
-    def marshalled(self, context):
-        """Modifies the envelope document before it is sent.
+    def egress(self, envelope, http_headers, operation, binding_options):
+        """Prune empty nodes before sending the XML
 
-        This method provides the plug-in with the opportunity to prune empty
-        nodes and fix nodes before sending it to the server.
-
-        :param context: send context
+        According to previous documentation here, the VI SDK throws server
+        errors if optional SOAP nodes are sent without values; e.g. <test/> as
+        opposed to <test>test</test>. Seeing that `zeep` can create such nodes
+        if optional elements in a sequence are not specified, we try to find
+        them and remove them.
         """
-        # Suds builds the entire request object based on the WSDL schema.
-        # VI SDK throws server errors if optional SOAP nodes are sent
-        # without values; e.g., <test/> as opposed to <test>test</test>.
+        self._prune(envelope)
+        return envelope, http_headers
 
-        self.prune(context.envelope)
-        context.envelope.walk(self.add_attribute_for_value)
+
+class AddAnyTypeTypeAttributePlugin(zeep.Plugin):
+
+    def _add_attribute_for_value(self, el):
+        tag_name = etree.QName(el.tag).localname
+        xsi_ns = zeep.xsd.const.xsi_ns
+        if tag_name in ('value', 'val'):
+            el.set(xsi_ns('type'), 'xsd:string')
+        elif tag_name == 'removeKey':
+            try:
+                int(el.text)
+                el.set(xsi_ns('type'), 'xsd:int')
+            except (ValueError, TypeError):
+                el.set(xsi_ns('type'), 'xsd:string')
+
+        for child in el:
+            self._add_attribute_for_value(child)
+
+    def egress(self, envelope, http_headers, operation, binding_options):
+        """Add an `xsi:type` attribute to value nodes
+
+        The VI SDK requires a type attribute to be set when AnyType is used,
+        but `zeep` only does it when explicitly provided with a special object,
+        we don't want to leak through the abstraction.
+        """
+        # TODO(jkulik): Once we're on a zeep version containing
+        # https://github.com/mvantellingen/python-zeep/pull/1079 we should be
+        # able to remove this plugin.
+        self._add_attribute_for_value(envelope)
+        return envelope, http_headers
 
 
 class Response(six.BytesIO):
@@ -161,59 +167,54 @@ class LocalFileAdapter(requests.adapters.HTTPAdapter):
         return self._build_response_from_file(request)
 
 
-class RequestsTransport(transport.Transport):
-    def __init__(self, cacert=None, insecure=True, pool_maxsize=10,
-                 connection_timeout=None, pool_block=False):
-        transport.Transport.__init__(self)
-        # insecure flag is used only if cacert is not
-        # specified.
-        self.verify = cacert if cacert else not insecure
-        self.session = requests.Session()
-        self.session.mount('file:///',
-                           LocalFileAdapter(pool_maxsize=pool_maxsize))
-        self.session.mount('https://', requests.adapters.HTTPAdapter(
-            pool_connections=pool_maxsize, pool_maxsize=pool_maxsize,
-            pool_block=pool_block))
-        self.cookiejar = self.session.cookies
-        self._connection_timeout = connection_timeout
+class FactoryCompatibilityProxy(object):
 
-    def open(self, request):
-        resp = self.session.get(request.url, verify=self.verify)
-        return six.BytesIO(resp.content)
+    def __init__(self, _client):
+        self._client = _client
+        self._factory_cache = {}
 
-    def send(self, request):
-        resp = self.session.post(request.url,
-                                 data=request.message,
-                                 headers=request.headers,
-                                 verify=self.verify,
-                                 timeout=self._connection_timeout)
-        return transport.Reply(resp.status_code, resp.headers, resp.content)
+    def create(self, obj, *args, **kwargs):
+        ns, obj = obj.split(':', 1)
+        if ns not in self._factory_cache:
+            self._factory_cache[ns] = self._client.type_factory(ns)
+        factory = self._factory_cache[ns]
+        return getattr(factory, obj)(*args, **kwargs)
 
 
-class MemoryCache(cache.ObjectCache):
-    def __init__(self):
-        self._cache = {}
+class CompatibilityZeepClient(zeep.client.Client):
+    """zeep Client with added `factory` attribute
 
-    def get(self, key):
-        """Retrieves the value for a key or None."""
-        now = timeutils.utcnow_ts()
-        for k in list(self._cache):
-            (timeout, _value) = self._cache[k]
-            if timeout and now >= timeout:
-                del self._cache[k]
+    The `factory` attribute is necessary for compatibility with the older suds
+    version of oslo.vmware. There's a lot of code using it, which would have to
+    be changed to use `Client.type_factory` instead.
 
-        return self._cache.get(key, (0, None))[1]
+    We also support setting the soap_url to something else than what the WSDL
+    ports return, which zeep otherwise doesn't support.
 
-    def put(self, key, value, time=CACHE_TIMEOUT):
-        """Sets the value for a key."""
-        timeout = 0
-        if time != 0:
-            timeout = timeutils.utcnow_ts() + time
-        self._cache[key] = (timeout, value)
-        return True
+    This class also creates a backend-independent interface for accessing the
+    cookiejar.
+    """
 
+    def __init__(self, *args, **kwargs):
+        soap_url = kwargs.pop('soap_url', None)
 
-_CACHE = MemoryCache()
+        super(CompatibilityZeepClient, self).__init__(*args, **kwargs)
+
+        self.factory = FactoryCompatibilityProxy(self)
+
+        # we cannot set this otherwise. it's parsed from the WSDL. we might
+        # need to reconfigure our vcenters to send proper WSDL service and
+        # ports
+        if soap_url is not None:
+            self.service._binding_options['address'] = soap_url
+
+    @property
+    def cookiejar(self):
+        return self.transport.session.cookies
+
+    @cookiejar.setter
+    def cookiejar(self, cookies):
+        self.transport.session.cookies = cookies
 
 
 class Service(object):
@@ -228,18 +229,30 @@ class Service(object):
         self.wsdl_url = wsdl_url
         self.soap_url = soap_url
         self.op_id_prefix = op_id_prefix
-        LOG.debug("Creating suds client with soap_url='%s' and wsdl_url='%s'",
+
+        LOG.debug("Creating zeep client with soap_url='%s' and wsdl_url='%s'",
                   self.soap_url, self.wsdl_url)
-        transport = RequestsTransport(cacert=cacert,
-                                      insecure=insecure,
-                                      pool_maxsize=pool_maxsize,
-                                      connection_timeout=connection_timeout,
-                                      pool_block=pool_block)
-        self.client = client.Client(self.wsdl_url,
-                                    transport=transport,
-                                    location=self.soap_url,
-                                    plugins=[ServiceMessagePlugin()],
-                                    cache=_CACHE)
+        session = requests.Session()
+        session.mount('https://', requests.adapters.HTTPAdapter(
+            pool_connections=pool_maxsize, pool_maxsize=pool_maxsize,
+            pool_block=pool_block))
+        session.mount('file:///', LocalFileAdapter(pool_maxsize=pool_maxsize))
+        session.verify = cacert if cacert else not insecure
+
+        cache = InMemoryCache(CACHE_TIMEOUT)
+
+        transport = \
+            zeep.transports.Transport(session=session,
+                                      operation_timeout=connection_timeout,
+                                      cache=cache)
+
+        plugins = [PruneEmptyNodesPlugin(), AddAnyTypeTypeAttributePlugin()]
+
+        self.client = CompatibilityZeepClient(self.wsdl_url,
+                                              transport=transport,
+                                              soap_url=self.soap_url,
+                                              plugins=plugins)
+
         self._service_content = None
         self._vc_session_cookie = None
 
@@ -304,14 +317,14 @@ class Service(object):
         """
         headers = []
         if self._vc_session_cookie:
-            elem = element.Element('vcSessionCookie').setText(
-                self._vc_session_cookie)
+            elem = etree.Element('vcSessionCookie')
+            elem.text = self._vc_session_cookie
             headers.append(elem)
         if op_id:
-            elem = element.Element('operationID').setText(op_id)
+            elem = etree.Element('operationID')
+            elem.text = op_id
             headers.append(elem)
-        if headers:
-            self.client.set_options(soapheaders=headers)
+        return headers
 
     @property
     def service_content(self):
@@ -321,7 +334,7 @@ class Service(object):
 
     def get_http_cookie(self):
         """Return the vCenter session cookie."""
-        cookies = self.client.options.transport.cookiejar
+        cookies = self.client.cookiejar
         for cookie in cookies:
             if cookie.name.lower() == 'vmware_soap_session':
                 return cookie.value
@@ -362,7 +375,9 @@ class Service(object):
                               vim_util.get_moref_type(managed_object),
                               attr_name,
                               op_id)
-                self._set_soap_headers(op_id)
+                headers = self._set_soap_headers(op_id)
+                if headers:
+                    kwargs['_soapheaders'] = headers
                 request = getattr(self.client.service, attr_name)
                 response = request(managed_object, **kwargs)
                 if (attr_name.lower() == 'retrievepropertiesex'):
@@ -373,28 +388,24 @@ class Service(object):
                 # check of the SOAP response.
                 raise
 
-            except suds.WebFault as excep:
+            except zeep.exceptions.Fault as excep:
                 fault_string = None
-                if excep.fault:
-                    fault_string = excep.fault.faultstring
+                if excep.message:
+                    fault_string = excep.message
 
-                doc = excep.document
-                detail = None
-                if doc is not None:
-                    detail = doc.childAtPath('/detail')
-                    if not detail:
-                        # NOTE(arnaud): this is needed with VC 5.1
-                        detail = doc.childAtPath('/Envelope/Body/Fault/detail')
                 fault_list = []
                 details = {}
-                if detail:
-                    for fault in detail.getChildren():
-                        fault_type = fault.get('type')
+                if excep.detail:
+                    for fault in excep.detail.getchildren():
+                        type_ns = '{' + fault.nsmap['xsi'] + '}'
+                        fault_type = fault.get('{}type'.format(type_ns))
                         if fault_type.endswith(exceptions.SECURITY_ERROR):
                             fault_type = exceptions.NOT_AUTHENTICATED
                         fault_list.append(fault_type)
-                        for child in fault.getChildren():
-                            details[child.name] = child.getText()
+                        for child in fault.getchildren():
+                            name = etree.QName(child.tag).localname
+                            details[name] = child.text
+
                 raise exceptions.VimFaultException(fault_list, fault_string,
                                                    excep, details)
 
