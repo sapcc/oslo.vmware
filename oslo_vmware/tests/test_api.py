@@ -137,6 +137,7 @@ class VMwareAPISessionTest(base.TestCase):
             wsdl_url=api_session._vim_wsdl_loc,
             cacert=self.cert_mock,
             insecure=False,
+            pool_block=False,
             pool_maxsize=VMwareAPISessionTest.POOL_SIZE,
             connection_timeout=None,
             op_id_prefix='oslo.vmware')
