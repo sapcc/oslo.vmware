@@ -137,6 +137,7 @@ class VMwareAPISessionTest(base.TestCase):
             wsdl_url=api_session._vim_wsdl_loc,
             cacert=self.cert_mock,
             insecure=False,
+            pool_block=False,
             pool_maxsize=VMwareAPISessionTest.POOL_SIZE,
             connection_timeout=None,
             op_id_prefix='oslo.vmware')
@@ -319,7 +320,7 @@ class VMwareAPISessionTest(base.TestCase):
         api_session = self._create_api_session(True)
         fault_string = 'Invalid property.'
         fault_list = [exceptions.INVALID_PROPERTY]
-        details = {u'name': suds.sax.text.Text(u'фира')}
+        details = {u'name': u'фира'}
 
         module = mock.Mock()
         module.api.side_effect = exceptions.VimFaultException(fault_list,
