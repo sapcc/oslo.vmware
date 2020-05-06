@@ -20,27 +20,68 @@ The VMware API utility module.
 import logging
 
 from oslo_utils import timeutils
-from suds import sudsobject
-
-try:
-    import suds.eventlet_patch
-except ImportError:
-    pass
+import zeep.helpers
+from zeep import xsd
 
 
 LOG = logging.getLogger(__name__)
 
 
-def get_moref(value, type_):
+def get_moref(value, type_, client_factory=None):
     """Get managed object reference.
 
     :param value: value of the managed object
     :param type_: type of the managed object
+    :param client_factory: factory object to create a ManagedObjectReference
     :returns: managed object reference with given value and type
     """
-    moref = sudsobject.Property(value)
-    moref._type = type_
+    if client_factory:
+        moref = client_factory.create('ns0:ManagedObjectReference',
+                                      value, type=type_)
+    else:
+        moref_type = xsd.ComplexType(attributes=[xsd.Attribute('type',
+                                                               xsd.String())])
+        moref_type = moref_type.extend(xsd.String())
+        moref = moref_type(value, type=type_)
     return moref
+
+
+def get_moref_value(moref):
+    """Get the value/id of a managed object reference
+
+    This function accepts a string representation of a ManagedObjectReference
+    like `VirtualMachine:vm-123` or only `vm-123`, but is also able to extract
+    it from the actual object as returned by the API.
+    """
+    if isinstance(moref, str):
+        # handle strings like VirtualMachine:vm-12312, but also vm-123123
+        if ':' in moref:
+            splits = moref.split(':')
+            return splits[1]
+        return moref
+
+    # assume it's a ManagedObjectReference object as created by `get_moref()`
+    # or returned by a request
+    return moref._value_1
+
+
+def get_moref_type(moref):
+    """Get the type of a managed object reference
+
+    This function accepts a string representation of a ManagedObjectReference
+    like `VirtualMachine:vm-123`, but is also able to extract it from the
+    actual object as returned by the API.
+    """
+    if isinstance(moref, str):
+        # handle strings like VirtualMachine:vm-12312
+        if ':' in moref:
+            splits = moref.split(':')
+            return splits[0]
+        return None
+
+    # assume it's a ManagedObjectReference object as created by `get_moref()`
+    # or returned by a request
+    return moref.type
 
 
 def build_selection_spec(client_factory, name):
@@ -308,7 +349,7 @@ def get_object_properties(vim, moref, properties_to_collect, skip_op_id=False):
                       len(properties_to_collect) == 0)
     property_spec = build_property_spec(
         client_factory,
-        type_=moref._type,
+        type_=get_moref_type(moref),
         properties_to_collect=properties_to_collect,
         all_properties=all_properties)
     object_spec = build_object_spec(client_factory, moref, [])

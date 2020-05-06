@@ -24,6 +24,7 @@ import six.moves.urllib.parse as urlparse
 import six.moves.urllib.request as urllib
 
 from oslo_vmware import pbm
+from oslo_vmware import vim_util
 from oslo_vmware.tests import base
 
 
@@ -110,8 +111,7 @@ class PBMUtilityTest(base.TestCase):
             profile=profile_id)
 
     def _create_datastore(self, value):
-        ds = mock.Mock()
-        ds.value = value
+        ds = vim_util.get_moref(value, 'Datastore')
         return ds
 
     def test_convert_datastores_to_hubs(self):
@@ -146,7 +146,8 @@ class PBMUtilityTest(base.TestCase):
 
         filtered_ds = pbm.filter_datastores_by_hubs(hubs, datastores)
         self.assertEqual(len(hubs), len(filtered_ds))
-        filtered_ds_values = [ds.value for ds in filtered_ds]
+        filtered_ds_values = [vim_util.get_moref_value(ds)
+                              for ds in filtered_ds]
         self.assertEqual(set(hub_ids), set(filtered_ds_values))
 
     def test_get_pbm_wsdl_location(self):
@@ -182,7 +183,7 @@ class PBMUtilityTest(base.TestCase):
         session.invoke_api.return_value = profile_id
 
         value = 'vm-1'
-        vm = mock.Mock(value=value)
+        vm = vim_util.get_moref(value, 'VirtualMachine')
         ret = pbm.get_profiles(session, vm)
 
         self.assertEqual(profile_id, ret)
