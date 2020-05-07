@@ -679,6 +679,24 @@ def is_vim_instance(o, vim_type_name):
                                                      sudsobject.Object))
 
 
+def serialize_object(obj):
+    """Convert Suds object into a dict."""
+    d = {}
+    for k, v in dict(obj).items():
+        if hasattr(v, '__keylist__'):
+            d[k] = serialize_object(v)
+        elif isinstance(v, list):
+            d[k] = []
+            for item in v:
+                if hasattr(item, '__keylist__'):
+                    d[k].append(serialize_object(item))
+                else:
+                    d[k].append(item)
+        else:
+            d[k] = v
+    return d
+
+
 def storage_placement_spec(client_factory,
                            dsc_ref,
                            type,
