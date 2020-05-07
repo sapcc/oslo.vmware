@@ -665,3 +665,8 @@ def propset_dict(propset):
         return {}
 
     return {prop.name: prop.val for prop in propset}
+
+
+def is_vim_instance(o, vim_type_name):
+    return isinstance(o, sudsobject.Factory.subclass(vim_type_name,
+                                                     sudsobject.Object))
