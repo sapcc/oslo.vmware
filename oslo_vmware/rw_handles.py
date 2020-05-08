@@ -365,7 +365,13 @@ class VmdkHandle(FileHandle):
         LOG.debug("Lease for %(url)s is in state: %(state)s.",
                   {'url': self._url,
                    'state': state})
-        if state == 'ready':
+        if self._get_progress() < 100:
+            LOG.error("Aborting lease for %s due to incomplete transfer.",
+                      self._url)
+            self._session.invoke_api(self._session.vim,
+                                     'HttpNfcLeaseAbort',
+                                     self._lease)
+        elif state == 'ready':
             LOG.debug("Releasing lease for %s.", self._url)
             self._session.invoke_api(self._session.vim,
                                      'HttpNfcLeaseComplete',
@@ -521,7 +527,14 @@ class VmdkWriteHandle(VmdkHandle):
                                               self._conn, update_progress)
 
     def get_imported_vm(self):
-        """"Get managed object reference of the VM created for import."""
+        """"Get managed object reference of the VM created for import.
+
+        :raises: VimException
+        """
+        if self._get_progress() < 100:
+            excep_msg = _("Incomplete VMDK upload to %s.") % self._url
+            LOG.exception(excep_msg)
+            raise exceptions.ImageTransferException(excep_msg)
         return self._vm_ref
 
     def tell(self):
