@@ -198,7 +198,7 @@ class VmdkWriteHandleTest(base.TestCase):
         vim_cookie = mock.Mock()
         vim_cookie.name = 'name'
         vim_cookie.value = 'value'
-        session.vim.client.options.transport.cookiejar = [vim_cookie]
+        session.vim.client.cookiejar = [vim_cookie]
         return session
 
     def test_init_failure(self):
@@ -299,7 +299,7 @@ class VmdkReadHandleTest(base.TestCase):
         vim_cookie = mock.Mock()
         vim_cookie.name = 'name'
         vim_cookie.value = 'value'
-        session.vim.client.options.transport.cookiejar = [vim_cookie]
+        session.vim.client.cookiejar = [vim_cookie]
         return session
 
     def test_init_failure(self):

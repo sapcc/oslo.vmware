@@ -216,6 +216,31 @@ class MemoryCache(cache.ObjectCache):
 _CACHE = MemoryCache()
 
 
+class CompatibilitySudsClient(client.Client):
+    """suds client with added cookiejar attribute
+
+    The cookiejar properties allow reading/setting the cookiejar used by the
+    transport.
+    """
+
+    """
+    Having the cookiejar attribute available as an interface on the client
+    instead of some child object exposed the interface in a way that makes
+    switching clients easier.
+    """
+    def __init__(self, *args, **kwargs):
+        super(CompatibilitySudsClient, self).__init__(*args, **kwargs)
+
+    @property
+    def cookiejar(self):
+        return self.client.options.transport.cookiejar
+
+    @cookiejar.setter
+    def cookiejar(self, cookies):
+        self.client.options.transport.session.cookies = cookies
+        self.client.options.transport.cookiejar = cookies
+
+
 class Service(object):
     """Base class containing common functionality for invoking vSphere
     services
@@ -235,11 +260,11 @@ class Service(object):
                                       pool_maxsize=pool_maxsize,
                                       connection_timeout=connection_timeout,
                                       pool_block=pool_block)
-        self.client = client.Client(self.wsdl_url,
-                                    transport=transport,
-                                    location=self.soap_url,
-                                    plugins=[ServiceMessagePlugin()],
-                                    cache=_CACHE)
+        self.client = CompatibilitySudsClient(self.wsdl_url,
+                                              transport=transport,
+                                              location=self.soap_url,
+                                              plugins=[ServiceMessagePlugin()],
+                                              cache=_CACHE)
         self._service_content = None
         self._vc_session_cookie = None
 
@@ -321,7 +346,7 @@ class Service(object):
 
     def get_http_cookie(self):
         """Return the vCenter session cookie."""
-        cookies = self.client.options.transport.cookiejar
+        cookies = self.client.cookiejar
         for cookie in cookies:
             if cookie.name.lower() == 'vmware_soap_session':
                 return cookie.value
