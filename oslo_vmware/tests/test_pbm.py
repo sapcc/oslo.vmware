@@ -24,8 +24,8 @@ import six.moves.urllib.parse as urlparse
 import six.moves.urllib.request as urllib
 
 from oslo_vmware import pbm
-from oslo_vmware import vim_util
 from oslo_vmware.tests import base
+from oslo_vmware import vim_util
 
 
 class PBMUtilityTest(base.TestCase):

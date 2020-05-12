@@ -23,7 +23,7 @@ from oslo_utils import timeutils
 from suds import sudsobject
 
 try:
-    import suds.eventlet_patch
+    import suds.eventlet_patch  # noqa
 except ImportError:
     pass
 

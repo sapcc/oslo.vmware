@@ -297,9 +297,10 @@ def get_fault_class(name):
 
 
 def translate_fault(localized_method_fault, excep_msg=None):
-    """Produce proper VimException subclass object based on a vmodl.LocalizedMethodFault.
-    
-    :param excep_msg: Message to set to the exception. Defaults to localizedMessage of the fault.
+    """Produce VimException subclass based on a vmodl.LocalizedMethodFault.
+
+    :param excep_msg: Message to set to the exception. Defaults to
+                      localizedMessage of the fault.
     """
     try:
         if not excep_msg:
@@ -311,7 +312,8 @@ def translate_fault(localized_method_fault, excep_msg=None):
         else:
             ex = VimFaultException([name], excep_msg)
     except Exception as e:
-        LOG.debug("Unexpected exception thrown (%s) while translating fault (%s) with message: %s.",
+        LOG.debug("Unexpected exception thrown (%s) while translating fault "
+                  "(%s) with message: %s.",
                   e, localized_method_fault, excep_msg)
         ex = VimException(message=excep_msg, cause=e)
 
