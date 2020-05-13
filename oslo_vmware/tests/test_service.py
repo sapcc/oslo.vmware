@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import cookielib
 import mock
 import requests
 import six
@@ -52,6 +53,23 @@ class ServiceMessagePluginTest(base.TestCase):
         self.plugin.prune.assert_called_once_with(context.envelope)
         context.envelope.walk.assert_called_once_with(
             self.plugin.add_attribute_for_value)
+
+
+class CompatibilitySudsClientTest(base.TestCase):
+    def setUp(self):
+        super(CompatibilitySudsClientTest, self).setUp()
+
+    @mock.patch('suds.reader.DefinitionsReader.open')
+    @mock.patch('suds.reader.DocumentReader.download', create=True)
+    def test_compatibility_suds_client(self, mock_reader, mock_open):
+        sudsclient = service.CompatibilitySudsClient('none://nothing')
+        self.assertTrue(isinstance(sudsclient.cookiejar, cookielib.CookieJar))
+
+        cookie = mock.Mock()
+        cookie.name = 'abcd'
+        cookie.value = 'xyz'
+        sudsclient.cookiejar = [cookie]
+        self.assertEqual(sudsclient.cookiejar, [cookie])
 
 
 class ServiceTest(base.TestCase):
