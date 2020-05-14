@@ -233,12 +233,12 @@ class CompatibilitySudsClient(client.Client):
 
     @property
     def cookiejar(self):
-        return self.client.options.transport.cookiejar
+        return self.options.transport.cookiejar
 
     @cookiejar.setter
     def cookiejar(self, cookies):
-        self.client.options.transport.session.cookies = cookies
-        self.client.options.transport.cookiejar = cookies
+        self.options.transport.session.cookies = cookies
+        self.options.transport.cookiejar = cookies
 
 
 class Service(object):
