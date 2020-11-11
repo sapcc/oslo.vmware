@@ -400,4 +400,5 @@ class ImageTransferUtilityTest(base.TestCase):
         image_service.update.assert_called_once_with(context,
                                                      image_id,
                                                      image_metadata,
-                                                     data=fake_VmdkReadHandle)
+                                                     data=fake_VmdkReadHandle,
+                                                     purge_props=False)

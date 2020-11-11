@@ -325,7 +325,7 @@ def upload_image(context, timeout_secs, image_service, image_id, owner_id,
     try:
         updater.start(interval=NFC_LEASE_UPDATE_PERIOD)
         image_service.update(context, image_id, image_metadata,
-                             data=read_handle)
+                             data=read_handle, purge_props=False)
     finally:
         updater.stop()
         read_handle.close()
