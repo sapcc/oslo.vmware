@@ -164,6 +164,18 @@ class VmdkHandleTest(base.TestCase):
 
         self.assertRaises(exceptions.VimException, handle.update_progress)
 
+    def test_release_lease_incomplete_transfer(self):
+        session = mock.Mock()
+        handle = rw_handles.VmdkHandle(session, None, 'fake-url', None)
+
+        handle._get_progress = mock.Mock(return_value=99)
+        session.invoke_api = mock.Mock()
+        handle._release_lease()
+
+        session.invoke_api.assert_called_with(handle._session.vim,
+                                              'HttpNfcLeaseAbort',
+                                              handle._lease)
+
 
 class VmdkWriteHandleTest(base.TestCase):
     """Tests for VmdkWriteHandle."""
@@ -259,8 +271,20 @@ class VmdkWriteHandleTest(base.TestCase):
 
         session.invoke_api = mock.Mock(
             side_effect=session_invoke_api_side_effect)
+        handle._get_progress = mock.Mock(return_value=100)
         handle.close()
         self.assertEqual(2, session.invoke_api.call_count)
+
+    def test_get_vm_incomplete_transfer(self):
+        session = self._create_mock_session()
+        handle = rw_handles.VmdkWriteHandle(session, '10.1.2.3', 443, 'rp-1',
+                                            'folder-1', None, 100)
+
+        handle._get_progress = mock.Mock(return_value=99)
+        session.invoke_api = mock.Mock()
+
+        self.assertRaises(exceptions.ImageTransferException,
+                          handle.get_imported_vm)
 
 
 class VmdkReadHandleTest(base.TestCase):
@@ -347,6 +371,7 @@ class VmdkReadHandleTest(base.TestCase):
 
         session.invoke_api = mock.Mock(
             side_effect=session_invoke_api_side_effect)
+        handle._get_progress = mock.Mock(return_value=100)
         handle.close()
         self.assertEqual(2, session.invoke_api.call_count)
 
