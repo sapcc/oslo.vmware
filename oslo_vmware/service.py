@@ -85,11 +85,15 @@ class AddAnyTypeTypeAttributePlugin(zeep.Plugin):
         if tag_name in ('value', 'val'):
             el.set(xsi_ns('type'), 'xsd:string')
         elif tag_name == 'removeKey':
-            try:
-                int(el.text)
-                el.set(xsi_ns('type'), 'xsd:int')
-            except (ValueError, TypeError):
-                el.set(xsi_ns('type'), 'xsd:string')
+            # we only add a type, if there wasn't any type set, because there
+            # are operations that need a ManagedObjectReference type on the
+            # removeKey
+            if not el.get(xsi_ns('type'), None):
+                try:
+                    int(el.text)
+                    el.set(xsi_ns('type'), 'xsd:int')
+                except (ValueError, TypeError):
+                    el.set(xsi_ns('type'), 'xsd:string')
 
         for child in el:
             self._add_attribute_for_value(child)
