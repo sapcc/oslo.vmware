@@ -20,6 +20,9 @@ Functions and classes for image transfer between ESX/VC & image service.
 import logging
 import tarfile
 
+from eventlet import event
+from eventlet import greenthread
+from eventlet import queue
 from eventlet import timeout
 import six
 
@@ -38,6 +41,7 @@ LOG = logging.getLogger(__name__)
 
 NFC_LEASE_UPDATE_PERIOD = 60  # update NFC lease every 60sec.
 CHUNK_SIZE = 64 * units.Ki  # default chunk size for image transfer
+TRANSFER_QUEUE_GET_TIMEOUT = 5  # timeout in seconds to get an item from queue
 
 
 def _create_progress_updater(handle):
@@ -47,19 +51,50 @@ def _create_progress_updater(handle):
         return updater
 
 
-def _start_transfer(read_handle, write_handle, timeout_secs):
+def _start_transfer(read_handle, write_handle, timeout_secs, queue_size=64):
     # read_handle/write_handle could be an NFC lease, so we need to
     # periodically update its progress
     read_updater = _create_progress_updater(read_handle)
     write_updater = _create_progress_updater(write_handle)
 
     timer = timeout.Timeout(timeout_secs)
+    read_done = event.Event()
+    write_done = event.Event()
+    data_queue = queue.LightQueue(maxsize=queue_size)
+
+    def _inner_write():
+        while not write_done.ready():
+            try:
+                # Block only if the read-thread hasn't finished, yet.
+                # Also, limit the time we are waiting for an item, to avoid
+                # blocking for a long time in the case when the read has
+                # finished but the get() is already invoked.
+                data = data_queue.get(block=(not read_done.ready()),
+                                      timeout=TRANSFER_QUEUE_GET_TIMEOUT)
+                write_handle.write(data)
+            except queue.Empty:
+                if read_done.ready():
+                    write_done.send()
+            except Exception as e:
+                write_done.send_exception(e)
+
+    def _inner_read():
+        while not read_done.ready():
+            try:
+                data = read_handle.read(CHUNK_SIZE)
+                if not data or write_done.ready():
+                    read_done.send()
+                else:
+                    data_queue.put(data, block=True)
+            except Exception as e:
+                read_done.send_exception(e)
+
+    read_thread = greenthread.spawn(_inner_read)
+    write_thread = greenthread.spawn(_inner_write)
+
     try:
-        while True:
-            data = read_handle.read(CHUNK_SIZE)
-            if not data:
-                break
-            write_handle.write(data)
+        read_done.wait()
+        write_done.wait()
     except timeout.Timeout as excep:
         msg = (_('Timeout, read_handle: "%(src)s", write_handle: "%(dest)s"') %
                {'src': read_handle,
@@ -78,6 +113,10 @@ def _start_transfer(read_handle, write_handle, timeout_secs):
             read_updater.stop()
         if write_updater:
             write_updater.stop()
+        if not read_done.ready():
+            read_thread.kill()
+        if not write_done.ready():
+            write_thread.kill()
         read_handle.close()
         write_handle.close()
 
