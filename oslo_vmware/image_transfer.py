@@ -61,9 +61,16 @@ def _start_transfer(read_handle, write_handle, timeout_secs):
                 break
             write_handle.write(data)
     except timeout.Timeout as excep:
-        msg = (_('Timeout, read_handle: "%(src)s", write_handle: "%(dest)s"') %
+        progress = 'unknown'
+        if isinstance(write_handle, rw_handles.VmdkHandle):
+            progress = '{}%'.format(write_handle._get_progress())
+        elif isinstance(read_handle, rw_handles.VmdkHandle):
+            progress = '{}%'.format(read_handle._get_progress())
+        msg = (_('Timeout, read_handle: "%(src)s", write_handle: "%(dest)s", '
+                 'progress: %(progress)s') %
                {'src': read_handle,
-                'dest': write_handle})
+                'dest': write_handle,
+                'progress': progress})
         LOG.exception(msg)
         raise exceptions.ImageTransferException(msg, excep)
     except Exception as excep:
