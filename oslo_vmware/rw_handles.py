@@ -298,6 +298,8 @@ class VmdkHandle(FileHandle):
         self._url = url
         self._last_logged_progress = 0
         self._last_progress_udpate = 0
+        self._last_progress = 0
+        self._last_progress_change = 0
         self._updater = None
 
         if update_progress:
@@ -313,6 +315,27 @@ class VmdkHandle(FileHandle):
                                 MIN_PROGRESS_DIFF_TO_LOG)):
             LOG.debug("Data transfer progress is %d%%.", progress)
             self._last_logged_progress = progress
+
+    def _check_progress_stalled(self, progress, now):
+        """Check if we still make progress
+
+        Compares the given progress to the last known progress to see if we
+        still go forward. Emits a warning otherwise.
+        """
+        if progress < self._last_progress:
+            LOG.warning('We made negative progress: before %(before)s%%, '
+                        'now %(now)s%%',
+                        {'before': self._last_progress,
+                         'now': progress})
+            self._last_progress_change = now
+        elif progress == self._last_progress:
+            LOG.warning('No progress made in %(interval)ss. Currently at '
+                        '%(progress)s%%',
+                        {'interval': now - self._last_progress_change,
+                         'progress': progress})
+        else:
+            self._last_progress_change = now
+        self._last_progress = progress
 
     def _get_progress(self):
         """Get current progress for updating progress to lease."""
@@ -333,6 +356,7 @@ class VmdkHandle(FileHandle):
         self._last_progress_udpate = now
         progress = int(self._get_progress())
         self._log_progress(progress)
+        self._check_progress_stalled(progress, now)
 
         try:
             self._session.invoke_api(self._session.vim,
