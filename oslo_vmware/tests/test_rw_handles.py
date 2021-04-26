@@ -22,6 +22,7 @@ import ssl
 import mock
 import requests
 import six
+import time
 
 from oslo_vmware import exceptions
 from oslo_vmware import rw_handles
@@ -151,7 +152,12 @@ class VmdkHandleTest(base.TestCase):
         session = mock.Mock()
         lease = mock.Mock()
         handle = rw_handles.VmdkHandle(session, lease, 'fake-url', None)
-        handle._get_progress = mock.Mock(return_value=50)
+        handle._get_progress = mock.Mock(return_value={"percent": 50,
+                                                       "bytes": 100,
+                                                       "total_size": 200})
+        # Set the time in the past, so we get a progress
+        handle._last_progress_change = handle._last_progress_update = \
+            time.time() - 60000
 
         handle.update_progress()
 
@@ -162,8 +168,13 @@ class VmdkHandleTest(base.TestCase):
     def test_update_progress_with_error(self):
         session = mock.Mock()
         handle = rw_handles.VmdkHandle(session, None, 'fake-url', None)
+        # Set the time in the past, so we get a progress
+        handle._last_progress_change = handle._last_progress_update = \
+            time.time() - 60000
 
-        handle._get_progress = mock.Mock(return_value=0)
+        handle._get_progress = mock.Mock(return_value={"percent": 0,
+                                                       "bytes": 0,
+                                                       "total_size": 200})
         session.invoke_api.side_effect = exceptions.VimException(None)
 
         self.assertRaises(exceptions.VimException, handle.update_progress)

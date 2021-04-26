@@ -21,6 +21,7 @@ VMDK files in VMware servers. It also contains a class to read images from
 glance server.
 """
 
+import datetime
 import logging
 import ssl
 import time
@@ -40,7 +41,7 @@ from oslo_vmware import vim_util
 
 LOG = logging.getLogger(__name__)
 
-MIN_PROGRESS_DIFF_TO_LOG = 25
+MIN_PROGRESS_DIFF_TO_LOG = 5
 MIN_UPDATE_INTERVAL = 60
 USER_AGENT = 'OpenStack-ESX-Adapter'
 
@@ -297,10 +298,10 @@ class VmdkHandle(FileHandle):
         self._lease = lease
         self._url = url
         self._last_logged_progress = 0
-        self._last_progress_udpate = 0
         self._last_progress = 0
-        self._last_progress_change = 0
         self._updater = None
+        self._last_progress_change = self._last_progress_update = \
+            time.time()
 
         if update_progress:
             self._updater = \
@@ -311,10 +312,17 @@ class VmdkHandle(FileHandle):
 
     def _log_progress(self, progress):
         """Log data transfer progress."""
-        if (progress == 100 or (progress - self._last_logged_progress >=
-                                MIN_PROGRESS_DIFF_TO_LOG)):
-            LOG.debug("Data transfer progress is %d%%.", progress)
-            self._last_logged_progress = progress
+        time_diff = time.time() - self._last_progress_update
+        time_diff_str = datetime.timedelta(seconds=time_diff)
+
+        LOG.info("Data Transfer progress: %(bytes)s"
+                 " of %(total_size)s in %(time_diff)s %(percent)s",
+                 {'bytes': progress['bytes'],
+                  'total_size': progress['total_size'],
+                  'time_diff': time_diff_str,
+                  'percent': progress['percent']
+                  }
+                 )
 
     def _check_progress_stalled(self, progress, now):
         """Check if we still make progress
@@ -322,19 +330,25 @@ class VmdkHandle(FileHandle):
         Compares the given progress to the last known progress to see if we
         still go forward. Emits a warning otherwise.
         """
-        if progress < self._last_progress:
+
+        if progress['bytes'] < self._last_logged_progress:
             LOG.warning('We made negative progress: before %(before)s%%, '
                         'now %(now)s%%',
                         {'before': self._last_progress,
-                         'now': progress})
+                         'now': progress['percent']})
             self._last_progress_change = now
-        elif progress == self._last_progress:
+        elif (progress['bytes'] == self._last_logged_progress
+                and (progress['bytes'] != 0
+                     or now - self._last_progress_change > 300)):
+            time_diff = (now - self._last_progress_change
+                         if self._last_progress_change else 0)
             LOG.warning('No progress made in %(interval)ss. Currently at '
                         '%(progress)s%%',
-                        {'interval': now - self._last_progress_change,
-                         'progress': progress})
+                        {'interval': datetime.timedelta(seconds=time_diff),
+                         'progress': progress['percent']})
         else:
             self._last_progress_change = now
+            self._last_logged_progress = progress['bytes']
         self._last_progress = progress
 
     def _get_progress(self):
@@ -351,18 +365,19 @@ class VmdkHandle(FileHandle):
                  VimSessionOverLoadException, VimConnectionException
         """
         now = time.time()
-        if (now - self._last_progress_udpate < MIN_UPDATE_INTERVAL):
+        if (now - self._last_progress_update < MIN_UPDATE_INTERVAL):
             return
-        self._last_progress_udpate = now
-        progress = int(self._get_progress())
+
+        progress = self._get_progress()
         self._log_progress(progress)
         self._check_progress_stalled(progress, now)
+        self._last_progress_update = now
 
         try:
             self._session.invoke_api(self._session.vim,
                                      'HttpNfcLeaseProgress',
                                      self._lease,
-                                     percent=progress)
+                                     percent=progress['percent'])
         except exceptions.VimException:
             with excutils.save_and_reraise_exception():
                 LOG.exception("Error occurred while updating the "
@@ -597,7 +612,12 @@ class VmdkWriteHandle(VmdkHandle):
         LOG.debug("Closed VMDK write handle for %s.", self._url)
 
     def _get_progress(self):
-        return float(self._bytes_written) / self._vmdk_size * 100
+        progress = {
+            'percent': int(float(self._bytes_written) / self._vmdk_size * 100),
+            'bytes': self._bytes_written,
+            'total_size': self._vmdk_size,
+        }
+        return progress
 
     def __str__(self):
         return "VMDK write handle for %s" % self._url
@@ -686,7 +706,12 @@ class VmdkReadHandle(VmdkHandle):
         LOG.debug("Closed VMDK read handle for %s.", self._url)
 
     def _get_progress(self):
-        return float(self._bytes_read) / self._vmdk_size * 100
+        progress = {
+            'percent': int(float(self._bytes_read) / self._vmdk_size * 100),
+            'bytes': self._bytes_read,
+            'total_size': self._vmdk_size,
+        }
+        return progress
 
     def __str__(self):
         return "VMDK read handle for %s" % self._url
