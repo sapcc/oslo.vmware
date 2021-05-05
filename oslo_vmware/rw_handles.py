@@ -289,6 +289,7 @@ class FileWriteHandle(FileHandle):
 
 class VmdkHandle(FileHandle):
     """VMDK handle based on HttpNfcLease."""
+    _url = None
 
     def __init__(self, session, lease, url, file_handle,
                  update_progress=False):
@@ -558,12 +559,17 @@ class VmdkWriteHandle(VmdkHandle):
         """
         try:
             self._release_lease()
+        except exceptions.ManagedObjectNotFoundException:
+            LOG.info("Lease for %(url)s not found.  No need to release.",
+                     {'url': self._url})
         except exceptions.VimException:
             LOG.warning("Error occurred while releasing the lease "
                         "for %s.",
                         self._url,
                         exc_info=True)
-        super(VmdkWriteHandle, self).close()
+            raise
+        finally:
+            super(VmdkWriteHandle, self).close()
         LOG.debug("Closed VMDK write handle for %s.", self._url)
 
     def _get_progress(self):
@@ -642,6 +648,9 @@ class VmdkReadHandle(VmdkHandle):
         """
         try:
             self._release_lease()
+        except exceptions.ManagedObjectNotFoundException:
+            LOG.info("Lease for %(url)s not found.  No need to release.",
+                     {'url': self._url})
         except exceptions.VimException:
             LOG.warning("Error occurred while releasing the lease "
                         "for %s.",
