@@ -39,7 +39,8 @@ def get_datastore_by_ref(session, ds_ref):
                       "summary.name",
                       "summary.capacity",
                       "summary.freeSpace",
-                      "summary.uncommitted"]
+                      "summary.uncommitted",
+                      "summary.url"]
 
     props = session.invoke_api(
         vim_util,
@@ -52,7 +53,8 @@ def get_datastore_by_ref(session, ds_ref):
                      capacity=props.get("summary.capacity"),
                      freespace=props.get("summary.freeSpace"),
                      uncommitted=props.get("summary.uncommitted"),
-                     type=props.get("summary.type"))
+                     type=props.get("summary.type"),
+                     url=props.get("summary.url"))
 
 
 def get_recommended_datastore_clone(session,
@@ -128,7 +130,8 @@ def sdrs_enabled(session, dsc_ref):
 class Datastore(object):
 
     def __init__(self, ref, name, capacity=None, freespace=None,
-                 uncommitted=None, type=None, datacenter=None):
+                 uncommitted=None, type=None, datacenter=None,
+                 url=None):
         """Datastore object holds ref and name together for convenience.
 
         :param ref: a vSphere reference to a datastore
@@ -139,6 +142,7 @@ class Datastore(object):
                             in bytes of datastore
         :param type: (optional) datastore type
         :param datacenter: (optional) oslo_vmware Datacenter object
+        :param url: (optional) summary url
         """
         if name is None:
             raise ValueError(_("Datastore name cannot be None"))
@@ -157,6 +161,7 @@ class Datastore(object):
         self.uncommitted = uncommitted
         self.type = type
         self.datacenter = datacenter
+        self.url = url
 
     def build_path(self, *paths):
         """Constructs and returns a DatastorePath.
