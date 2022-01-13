@@ -13,16 +13,26 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from datetime import date, datetime
 import json
 import suds.sudsobject
 
 from oslo_vmware import vim_util
 
 
+def _custom_serializer(obj):
+    """Custom serialiser for objects not serialisable by default"""
+
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError("{!r} is not JSON serializable".format(obj))
+
+
 class _JsonPrinter(object):
     def tostr(self, obj, indent=-2):
         """Get s string representation of object."""
-        return json.dumps(vim_util.serialize_object(obj))
+        return json.dumps(vim_util.serialize_object(obj),
+                          default=_custom_serializer)
 
 
 suds.sudsobject.Printer = _JsonPrinter
