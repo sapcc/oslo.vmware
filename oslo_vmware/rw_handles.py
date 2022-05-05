@@ -219,12 +219,14 @@ class FileHandle(object):
 class FileWriteHandle(FileHandle):
     """Write handle for a file in VMware server."""
 
-    def __init__(self, host, port, data_center_name, datastore_name, cookies,
-                 file_path, file_size, scheme='https', cacerts=False,
+    def __init__(self, host_or_url, port=None, data_center_name=None,
+                 datastore_name=None, cookies=None, file_path=None,
+                 file_size=None, scheme='https', cacerts=False,
                  thumbprint=None):
         """Initializes the write handle with given parameters.
 
-        :param host: ESX/VC server IP address or host name
+        :param host_or_url: ESX/VC server IP address or host name or a complete
+                            DatastoreURL
         :param port: port for connection
         :param data_center_name: name of the data center in the case of a VC
                                  server
@@ -239,10 +241,13 @@ class FileWriteHandle(FileHandle):
         :param thumbprint: expected SHA1 thumbprint of server's certificate
         :raises: VimConnectionException, ValueError
         """
-        soap_url = self._get_soap_url(scheme, host, port)
-        param_list = {'dcPath': data_center_name, 'dsName': datastore_name}
-        self._url = '%s/folder/%s' % (soap_url, file_path)
-        self._url = self._url + '?' + urlparse.urlencode(param_list)
+        if not port and not data_center_name and not datastore_name:
+            self._url = host_or_url
+        else:
+            soap_url = self._get_soap_url(scheme, host_or_url, port)
+            param_list = {'dcPath': data_center_name, 'dsName': datastore_name}
+            self._url = '%s/folder/%s' % (soap_url, file_path)
+            self._url = self._url + '?' + urlparse.urlencode(param_list)
 
         self._conn = self._create_write_connection('PUT',
                                                    self._url,
@@ -291,12 +296,14 @@ class FileWriteHandle(FileHandle):
 class FileReadHandle(FileHandle):
     """Read handle for a file in VMware server."""
 
-    def __init__(self, host, port, data_center_name, datastore_name, cookies,
-                 file_path, scheme='https', cacerts=False,
+    def __init__(self, host_or_url, port=None, data_center_name=None,
+                 datastore_name=None, cookies=None,
+                 file_path=None, scheme='https', cacerts=False,
                  thumbprint=None):
         """Initializes the read handle with given parameters.
 
-        :param host: ESX/VC server IP address or host name
+        :param host_or_url: ESX/VC server IP address or host name or a complete
+                            DatastoreURL
         :param port: port for connection
         :param data_center_name: name of the data center in the case of a VC
                                  server
@@ -310,10 +317,13 @@ class FileReadHandle(FileHandle):
         :param thumbprint: expected SHA1 thumbprint of server's certificate
         :raises: VimConnectionException, ValueError
         """
-        soap_url = self._get_soap_url(scheme, host, port)
-        param_list = {'dcPath': data_center_name, 'dsName': datastore_name}
-        self._url = '%s/folder/%s' % (soap_url, file_path)
-        self._url = self._url + '?' + urlparse.urlencode(param_list)
+        if not port and not data_center_name and not datastore_name:
+            self._url = host_or_url
+        else:
+            soap_url = self._get_soap_url(scheme, host_or_url, port)
+            param_list = {'dcPath': data_center_name, 'dsName': datastore_name}
+            self._url = '%s/folder/%s' % (soap_url, file_path)
+            self._url = self._url + '?' + urlparse.urlencode(param_list)
 
         self._conn = self._create_read_connection(self._url,
                                                   cookies=cookies,
@@ -354,7 +364,7 @@ class FileReadHandle(FileHandle):
         return self._file_handle.getheader('Content-Length')
 
     def __str__(self):
-        return "File write handle for %s" % self._url
+        return "File read handle for %s" % self._url
 
 
 class VmdkHandle(FileHandle):
