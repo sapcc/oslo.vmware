@@ -31,6 +31,7 @@ from oslo_utils import netutils
 import requests
 import six
 import six.moves.urllib.parse as urlparse
+
 from urllib3 import connection as httplib
 
 from oslo_vmware._i18n import _
@@ -152,11 +153,12 @@ class FileHandle(object):
 
     def _build_vim_cookie_header(self, vim_cookies):
         """Build ESX host session cookie header."""
-        cookie_header = ""
+        # As returned from DatastoreURL.get_transfer_ticket
+        if isinstance(vim_cookies, six.string_types):
+            return vim_cookies
         for vim_cookie in vim_cookies:
-            cookie_header = vim_cookie.name + '=' + vim_cookie.value
-            break
-        return cookie_header
+            return vim_cookie.name + '=' + vim_cookie.value
+        return ""
 
     def write(self, data):
         """Write data to the file.
@@ -227,7 +229,9 @@ class FileWriteHandle(FileHandle):
         :param data_center_name: name of the data center in the case of a VC
                                  server
         :param datastore_name: name of the datastore where the file is stored
-        :param cookies: cookies to build the vim cookie header
+        :param cookies: cookies to build the vim cookie header, or a string
+                        with the prebuild vim cookie header
+                        (See: DatastoreURL.get_transfer_ticket())
         :param file_path: datastore path where the file is written
         :param file_size: size of the file in bytes
         :param scheme: protocol-- http or https
@@ -297,7 +301,9 @@ class FileReadHandle(FileHandle):
         :param data_center_name: name of the data center in the case of a VC
                                  server
         :param datastore_name: name of the datastore where the file is stored
-        :param cookies: cookies to build the vim cookie header
+        :param cookies: cookies to build the vim cookie header, or a string
+                        with the prebuild vim cookie header
+                        (See: DatastoreURL.get_transfer_ticket())
         :param file_path: datastore path where the file is written
         :param scheme: protocol-- http or https
         :param cacerts: CA bundle file to use for SSL verification
