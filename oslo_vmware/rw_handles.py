@@ -62,7 +62,7 @@ class FileHandle(object):
         self._file_handle = file_handle
 
     def _create_connection(self, url, method, cacerts=False,
-                           ssl_thumbprint=None):
+                           ssl_thumbprint=None, cookies=None):
         _urlparse = urlparse.urlparse(url)
         scheme, netloc, path, params, query, fragment = _urlparse
         if scheme == 'http':
@@ -90,16 +90,18 @@ class FileHandle(object):
         if query:
             path = path + '?' + query
         conn.putrequest(method, path)
+        conn.putheader('User-Agent', USER_AGENT)
+        if cookies:
+            vim_cookie = self._build_vim_cookie_header(cookies)
+            conn.putheader('Cookie', vim_cookie)
         return conn
 
     def _create_read_connection(self, url, cookies=None, cacerts=False,
                                 ssl_thumbprint=None):
         LOG.debug("Opening URL: %s for reading.", url)
         try:
-            conn = self._create_connection(url, 'GET', cacerts, ssl_thumbprint)
-            vim_cookie = self._build_vim_cookie_header(cookies)
-            conn.putheader('User-Agent', USER_AGENT)
-            conn.putheader('Cookie', vim_cookie)
+            conn = self._create_connection(url, 'GET', cacerts, ssl_thumbprint,
+                                           cookies=cookies)
             conn.endheaders()
             return conn
         except Exception as excep:
@@ -125,19 +127,13 @@ class FileHandle(object):
                    'url': url})
         try:
             conn = self._create_connection(url, method, cacerts,
-                                           ssl_thumbprint)
-            headers = {'User-Agent': USER_AGENT}
+                                           ssl_thumbprint, cookies=cookies)
             if file_size:
-                headers.update({'Content-Length': str(file_size)})
+                conn.putheader('Content-Length', str(file_size))
             if overwrite:
-                headers.update({'Overwrite': overwrite})
-            if cookies:
-                headers.update({'Cookie':
-                               self._build_vim_cookie_header(cookies)})
+                conn.putheader('Overwrite', overwrite)
             if content_type:
-                headers.update({'Content-Type': content_type})
-            for key, value in six.iteritems(headers):
-                conn.putheader(key, value)
+                conn.putheader('Content-Type', content_type)
             conn.endheaders()
             return conn
         except requests.RequestException as excep:
