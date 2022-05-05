@@ -287,6 +287,73 @@ class FileWriteHandle(FileHandle):
         return "File write handle for %s" % self._url
 
 
+class FileReadHandle(FileHandle):
+    """Read handle for a file in VMware server."""
+
+    def __init__(self, host, port, data_center_name, datastore_name, cookies,
+                 file_path, scheme='https', cacerts=False,
+                 thumbprint=None):
+        """Initializes the read handle with given parameters.
+
+        :param host: ESX/VC server IP address or host name
+        :param port: port for connection
+        :param data_center_name: name of the data center in the case of a VC
+                                 server
+        :param datastore_name: name of the datastore where the file is stored
+        :param cookies: cookies to build the vim cookie header
+        :param file_path: datastore path where the file is written
+        :param scheme: protocol-- http or https
+        :param cacerts: CA bundle file to use for SSL verification
+        :param thumbprint: expected SHA1 thumbprint of server's certificate
+        :raises: VimConnectionException, ValueError
+        """
+        soap_url = self._get_soap_url(scheme, host, port)
+        param_list = {'dcPath': data_center_name, 'dsName': datastore_name}
+        self._url = '%s/folder/%s' % (soap_url, file_path)
+        self._url = self._url + '?' + urlparse.urlencode(param_list)
+
+        self._conn = self._create_read_connection(self._url,
+                                                  cookies=cookies,
+                                                  cacerts=cacerts,
+                                                  ssl_thumbprint=thumbprint)
+        FileHandle.__init__(self, self._conn.getresponse())
+
+    def read(self, length):
+        """Read data from the file.
+
+        :param length: amount of data to be read
+        :raises: VimConnectionException, VimException
+        """
+        try:
+            return self._file_handle.read(length)
+        except requests.RequestException as excep:
+            excep_msg = _("Connection error occurred while reading data from"
+                          " %s.") % self._url
+            LOG.exception(excep_msg)
+            raise exceptions.VimConnectionException(excep_msg, excep)
+        except Exception as excep:
+            # TODO(vbala) We need to catch and raise specific exceptions
+            # related to connection problems, invalid request and invalid
+            # arguments.
+            excep_msg = _("Error occurred while writing data to"
+                          " %s.") % self._url
+            LOG.exception(excep_msg)
+            raise exceptions.VimException(excep_msg, excep)
+
+    def close(self):
+        """Closes the connection.
+        """
+        self._conn.close()
+        super(FileReadHandle, self).close()
+        LOG.debug("Closed File read handle for %s.", self._url)
+
+    def get_size(self):
+        return self._file_handle.getheader('Content-Length')
+
+    def __str__(self):
+        return "File write handle for %s" % self._url
+
+
 class VmdkHandle(FileHandle):
     """VMDK handle based on HttpNfcLease."""
 
