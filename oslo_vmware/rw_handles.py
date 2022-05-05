@@ -703,7 +703,8 @@ class VmdkReadHandle(VmdkHandle):
                                                   cookies=cookies,
                                                   ssl_thumbprint=thumbprint)
         super(VmdkReadHandle, self).__init__(session, lease, url,
-                                             self._conn.getresponse(), update_progress)
+                                             self._conn.getresponse(),
+                                             update_progress)
     def read(self, chunk_size):
         """Read a chunk of data from the VMDK file.
 
