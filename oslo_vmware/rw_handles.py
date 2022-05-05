@@ -101,7 +101,7 @@ class FileHandle(object):
             conn.putheader('User-Agent', USER_AGENT)
             conn.putheader('Cookie', vim_cookie)
             conn.endheaders()
-            return conn.getresponse()
+            return conn
         except Exception as excep:
             # TODO(vbala) We need to catch and raise specific exceptions
             # related to connection problems, invalid request and invalid
@@ -628,7 +628,8 @@ class VmdkReadHandle(VmdkHandle):
                                                   cookies=cookies,
                                                   ssl_thumbprint=thumbprint)
         super(VmdkReadHandle, self).__init__(session, lease, url,
-                                             self._conn, update_progress)
+                                             self._conn.getresponse(),
+                                             update_progress)
 
     def read(self, chunk_size):
         """Read a chunk of data from the VMDK file.
@@ -659,6 +660,7 @@ class VmdkReadHandle(VmdkHandle):
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException, VimConnectionException
         """
+        self._conn.close()
         try:
             self._release_lease()
         except exceptions.ManagedObjectNotFoundException:
