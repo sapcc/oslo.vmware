@@ -22,6 +22,7 @@ glance server.
 """
 
 import logging
+import OpenSSL
 import ssl
 import time
 
@@ -717,3 +718,50 @@ class ImageReadHandle(object):
 
     def __str__(self):
         return "Image read handle"
+
+
+class UrlPullHandle(object):
+    """Base class for a URL from where VMware can download VMDKs
+
+    This kind of handles are being used in conjunction with
+    HttpNfcLeasePullFromUrls_Task, converting an existing lease
+    to "Pull" mode.
+    """
+
+    def url(self):
+        """Returns the URL to the VMDK."""
+        raise NotImplementedError()
+
+    def headers(self):
+        """Optional headers that can be set on the request."""
+        return {}
+
+    def ssl_thumbprint(self):
+        # Find SSL Thumbprint of the Swift endpoint, needed by VMWare
+        urlinfo = urlparse.urlparse(self.url())
+        cert = ssl.get_server_certificate((urlinfo.hostname,
+                                           urlinfo.port or 443))
+        x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM,
+                                               cert)
+        return x509.digest("sha1")
+
+
+class SwiftUrlPullHandle(UrlPullHandle):
+
+    SWIFT_PREFIX = "swift+"
+
+    def __init__(self, direct_url, auth_token):
+        super(SwiftUrlPullHandle, self).__init__()
+        self._auth_token = auth_token
+        self._url = None
+
+        if direct_url and direct_url.startswith(self.SWIFT_PREFIX):
+            self._url = direct_url.replace(self.SWIFT_PREFIX, "")
+        else:
+            raise ValueError("The provided URL is not from swift.")
+
+    def url(self):
+        return self._url
+
+    def headers(self):
+        return {'X-Auth-Token': self._auth_token}
