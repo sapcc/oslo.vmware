@@ -243,6 +243,23 @@ def download_stream_optimized_image(context, timeout_secs, image_service,
               {'id': image_id,
                'container': container_format})
 
+    allow_pull_from_url = kwargs.get('allow_pull_from_url', False)
+    url_handle = None
+
+    if allow_pull_from_url and container_format == 'bare':
+        (direct_url, locations) = image_service.get_location(context, image_id)
+        try:
+            url_handle = rw_handles.SwiftUrlPullHandle(
+                direct_url, context.get_auth_plugin().auth_token)
+        except ValueError as e:
+            LOG.debug(e)
+
+    if url_handle:
+        imported_vm = image_pull_from_url(url_handle, **kwargs)
+        LOG.debug("Downloaded image: %s from image direct URL as a stream "
+                  "optimized file.")
+        return imported_vm
+
     # TODO(vbala) catch specific exceptions raised by download call
     read_iter = image_service.download(context, image_id)
     read_handle = rw_handles.ImageReadHandle(read_iter)
@@ -346,3 +363,59 @@ def upload_image(context, timeout_secs, image_service, image_id, owner_id,
         updater.stop()
         read_handle.close()
     LOG.debug("Uploaded image: %s.", image_id)
+
+
+def image_pull_from_url(url_handle, **kwargs):
+    """Converts a lease to pull from URLs and waits for the import.
+    Using HttpNfcLeasePullFromUrls_Task
+    """
+    session = kwargs.get('session')
+    size = kwargs.get('image_size')
+
+    (lease, lease_info) = \
+        rw_handles.VmdkHandle._create_import_vapp_lease(
+            kwargs.get('session'), kwargs.get('resource_pool'),
+            kwargs.get('vm_import_spec'), kwargs.get('vm_folder'))
+
+    try:
+        return upgrade_lease_to_pull_mode(
+            session, lease, lease_info, url_handle, size)
+    finally:
+        session.invoke_api(session.vim,
+                           'HttpNfcLeaseComplete',
+                           lease)
+
+
+def upgrade_lease_to_pull_mode(session, lease, lease_info, url_handle, size):
+    if not lease_info.deviceUrl:
+        raise Exception("Invalid HttpNfc lease. "
+                        "No DeviceURLs found to import to.")
+
+    import_key = lease_info.deviceUrl[0].importKey
+
+    client_factory = session.vim.client.factory
+    file_spec = client_factory.create("ns0:HttpNfcLeaseSourceFile")
+    file_spec.targetDeviceId = import_key
+    file_spec.url = url_handle.url()
+    file_spec.create = True
+    file_spec.sslThumbprint = url_handle.ssl_thumbprint()
+    if size:
+        file_spec.size = size
+    headers = url_handle.headers()
+    if headers:
+        file_spec.httpHeaders = vim_util.dict_to_kv(client_factory,
+                                                    headers)
+    pull_task = session.invoke_api(session.vim,
+                                   "HttpNfcLeasePullFromUrls_Task",
+                                   lease,
+                                   files=[file_spec])
+
+    LOG.debug("Started pulling the image from URL %(url)s",
+              {'url': url_handle.url()})
+
+    session.wait_for_task(pull_task)
+
+    LOG.debug("Completed pulling the image from URL %(url)s",
+              {'url': url_handle.url()})
+
+    return lease_info.entity

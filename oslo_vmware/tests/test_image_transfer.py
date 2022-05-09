@@ -313,6 +313,35 @@ class ImageTransferUtilityTest(base.TestCase):
         self._test_download_stream_optimized_image(container='ova',
                                                    invalid_ova=True)
 
+    @mock.patch.object(image_transfer, 'image_pull_from_url')
+    def test_download_stream_optimized_image_from_swift(self, mock_img_pull):
+        image_service = mock.Mock()
+        context = mock.Mock()
+        context.get_auth_plugin.return_value = mock.Mock(
+            auth_token=mock.sentinel.auth_token)
+        timeout_secs = mock.sentinel.timeout_secs
+        image_id = mock.sentinel.image_id
+        session = mock.sentinel.session
+
+        image_service.show.return_value = {'container_format': 'bare'}
+        image_service.download.return_value = mock.Mock()
+        image_service.get_location.return_value = ('swift+https://example.com',
+                                                   [])
+        mock_img_pull.return_value = 'fake-url-ref'
+
+        kwargs = {'session': session,
+                  'allow_pull_from_url': True}
+
+        imported_vm = image_transfer.download_stream_optimized_image(
+            context,
+            timeout_secs,
+            image_service,
+            image_id,
+            **kwargs)
+
+        self.assertEqual('fake-url-ref', imported_vm)
+        self.assertEqual(1, len(mock_img_pull.mock_calls))
+
     @mock.patch.object(image_transfer, '_start_transfer')
     @mock.patch('oslo_vmware.rw_handles.VmdkReadHandle')
     @mock.patch('oslo_vmware.common.loopingcall.FixedIntervalLoopingCall')
