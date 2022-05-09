@@ -194,6 +194,18 @@ def download_stream_optimized_data(context, timeout_secs, read_handle,
              ImageTransferException, ValueError
     """
     file_size = int(kwargs.get('image_size'))
+
+    if isinstance(read_handle, rw_handles.ImageSwiftUrl):
+        (lease, lease_info) = \
+            rw_handles.VmdkWriteHandle._create_import_vapp_lease(
+                kwargs.get('session'), kwargs.get('resource_pool'),
+                kwargs.get('vm_import_spec'), kwargs.get('vm_folder'))
+        imported_vm_ref = image_pull_from_url(
+            kwargs.get('session'), lease, lease_info, read_handle.url,
+            size=file_size, ssl_thumbprint=read_handle.ssl_thumbprint,
+            headers={'X-Auth-Token': read_handle.auth_token})
+        return imported_vm_ref
+
     write_handle = rw_handles.VmdkWriteHandle(kwargs.get('session'),
                                               kwargs.get('host'),
                                               kwargs.get('port'),
@@ -235,7 +247,7 @@ def download_stream_optimized_image(context, timeout_secs, image_service,
              VimSessionOverLoadException, VimConnectionException,
              ImageTransferException, ValueError
     """
-    metadata = image_service.show(context, image_id)
+    metadata = image_service.show(context, image_id, include_locations=True)
     container_format = metadata.get('container_format')
 
     LOG.debug("Downloading image: %(id)s (container: %(container)s) from image"
@@ -243,15 +255,20 @@ def download_stream_optimized_image(context, timeout_secs, image_service,
               {'id': image_id,
                'container': container_format})
 
-    # TODO(vbala) catch specific exceptions raised by download call
-    read_iter = image_service.download(context, image_id)
-    read_handle = rw_handles.ImageReadHandle(read_iter)
+    swift_url = rw_handles.ImageSwiftUrl(metadata,
+                                         context.get_auth_plugin().auth_token)
+    if swift_url.is_valid() and container_format == 'bare':
+        read_handle = swift_url
+    else:
+        # TODO(vbala) catch specific exceptions raised by download call
+        read_iter = image_service.download(context, image_id)
+        read_handle = rw_handles.ImageReadHandle(read_iter)
 
-    if container_format == 'ova':
-        read_handle = _get_vmdk_handle(read_handle)
-        if read_handle is None:
-            raise exceptions.ImageTransferException(
-                _("No vmdk found in the OVA image %s.") % image_id)
+        if container_format == 'ova':
+            read_handle = _get_vmdk_handle(read_handle)
+            if read_handle is None:
+                raise exceptions.ImageTransferException(
+                    _("No vmdk found in the OVA image %s.") % image_id)
 
     imported_vm = download_stream_optimized_data(context, timeout_secs,
                                                  read_handle, **kwargs)
@@ -340,3 +357,45 @@ def upload_image(context, timeout_secs, image_service, image_id, owner_id,
         updater.stop()
         read_handle.close()
     LOG.debug("Uploaded image: %s.", image_id)
+
+
+def image_pull_from_url(session, lease_ref, lease_info, url,
+                        size=None, ssl_thumbprint=None, headers=None):
+    """Converts a lease to pull from URLs and waits for the import.
+    Using HttpNfcLeasePullFromUrls_Task
+    """
+    if not lease_info.deviceUrl:
+        raise Exception("Invalid HttpNfc lease. "
+                        "No DeviceURLs found to import to.")
+
+    import_key = lease_info.deviceUrl[0].importKey
+
+    client_factory = session.vim.client.factory
+    file_spec = client_factory.create("ns0:HttpNfcLeaseSourceFile")
+    file_spec.targetDeviceId = import_key
+    file_spec.url = url
+    file_spec.create = True
+    file_spec.sslThumbprint = ssl_thumbprint
+    if size:
+        file_spec.size = size
+    if headers:
+        file_spec.httpHeaders = vim_util.dict_to_kv(client_factory,
+                                                    headers)
+    pull_task = session._call_method(session.vim,
+                                     "HttpNfcLeasePullFromUrls_Task",
+                                     lease_ref,
+                                     files=[file_spec])
+
+    LOG.debug("Started pulling the image from URL %(url)s",
+              {'url': url})
+
+    session._wait_for_task(pull_task)
+
+    LOG.debug("Completed pulling the image from URL %(url)s",
+              {'url': url})
+
+    session.invoke_api(session.vim,
+                       'HttpNfcLeaseComplete',
+                       lease_ref)
+
+    return lease_info.entity

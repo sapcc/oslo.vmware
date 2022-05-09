@@ -22,6 +22,7 @@ glance server.
 """
 
 import logging
+import OpenSSL
 import ssl
 import time
 
@@ -719,3 +720,32 @@ class ImageReadHandle(object):
 
     def __str__(self):
         return "Image read handle"
+
+
+class ImageSwiftUrl(object):
+    """Class encapsulating info to download an image from Swift"""
+
+    SWIFT_PREFIX = "swift+"
+
+    def __init__(self, image_meta, auth_token):
+        self.auth_token = auth_token
+        self.url = None
+
+        image_url = image_meta.get("direct_url")
+        if image_url and image_url.startswith(self.SWIFT_PREFIX):
+            self.url = image_url.replace(self.SWIFT_PREFIX, "")
+
+        if self.is_valid():
+            self.ssl_thumbprint = self._fetch_ssl_thumbprint()
+
+    def is_valid(self):
+        return self.url is not None
+
+    def _fetch_ssl_thumbprint(self):
+        # Find SSL Thumbprint of the Swift endpoint, needed by VMWare
+        urlinfo = urlparse(self.url)
+        cert = ssl.get_server_certificate((urlinfo.hostname,
+                                           urlinfo.port or 443))
+        x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM,
+                                               cert)
+        return x509.digest("sha1")

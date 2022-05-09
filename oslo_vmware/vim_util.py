@@ -723,3 +723,19 @@ def storage_placement_spec(client_factory,
     spec.resourcePool = res_pool_ref
     spec.host = host_ref
     return spec
+
+
+def dict_to_kv(client_factory, dict_param):
+    """Converts python dictionary to a vim.KeyValue
+    :param client_factory: the client factory
+    :param dict_param: the dictionary
+    :return: list of KeyValue
+    """
+    def _convert(k, v):
+        kv = client_factory.create("ns0:KeyValue")
+        kv.key = k
+        kv.value = v
+        return kv
+
+    return [_convert(k, v)
+            for k, v in dict_param.items()]
