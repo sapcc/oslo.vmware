@@ -456,3 +456,22 @@ class ImageReadHandleTest(base.TestCase):
         for _ in range(0, max_items):
             self.assertEqual(item, handle.read(10))
         self.assertFalse(handle.read(10))
+
+
+class SwiftUrlPullHandleTest(base.TestCase):
+
+    def test_image_swift_url(self):
+        helper = rw_handles.SwiftUrlPullHandle('swift+https://example.com/v1',
+                                               None)
+        self.assertEqual('https://example.com/v1', helper.url())
+
+    def test_image_swift_invalid_url(self):
+        self.assertRaises(ValueError,
+                          rw_handles.SwiftUrlPullHandle,
+                          'https://foo.com',
+                          None)
+
+        self.assertRaises(ValueError,
+                          rw_handles.SwiftUrlPullHandle,
+                          None,
+                          None)
