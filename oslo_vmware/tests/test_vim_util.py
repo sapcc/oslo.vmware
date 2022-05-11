@@ -22,6 +22,131 @@ from oslo_vmware.tests import base
 from oslo_vmware import vim_util
 
 
+class FakeSXTypeDesc(object):
+    def __init__(self, name, type):
+        self.name = name
+        self.type = [type]
+
+
+class FakeSXType(object):
+    def __init__(self, name, children):
+        self.name = name
+        self._children = [
+            FakeSXTypeDesc(k, v) for k, v in children.items()
+        ]
+
+    def get_child(self, name):
+        for child in self._children:
+            if child.name == name:
+                return child, None
+        print([(child.name, child.type[0]) for child in self._children])
+        raise ValueError(
+            "Didn't expect child by name '{}' in '{}'".format(name, self.name))
+
+    def children(self):
+        for child in self._children:
+            yield child, None
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+
+class FakeObject(object):
+    DEFAULT_TYPE = "Class"
+
+    def __init__(self, type=None, **members):
+        sxtype = FakeFactory.find(type or FakeObject.DEFAULT_TYPE)
+        if not sxtype:
+            raise ValueError("Unknown type {}".format(type))
+        self.__metadata__ = dict(sxtype=sxtype)
+        self.__keylist__ = []
+        for k, v in members.items():
+            setattr(self, k, v)
+
+    def __setattr__(self, name, value):
+        if not name.startswith("__") and name not in self.__keylist__:
+            self.__keylist__.append(name)
+        self.__dict__[name] = value
+
+    def __iter__(self):
+        for key in self.__keylist__:
+            yield key, getattr(self, key)
+
+    def __str__(self):
+        sxtype = self.__metadata__['sxtype']
+        return "{}({})".format(
+            sxtype.name,
+            ", ".join("{}={!r}".format(k, getattr(self, k))
+                      for k in self.__keylist__
+                      if getattr(self, k) is not None))
+
+    def __repr__(self):
+        return str(self)
+
+    def __eq__(self, other):
+        own_type = self.__metadata__['sxtype']
+        other_type = other.__metadata__['sxtype']
+        if own_type != other_type:
+            return False
+
+        keylist = set(self.__keylist__) | set(other.__keylist__)
+        for key in keylist:
+            own_value = getattr(self, key, None)
+            other_value = getattr(other, key, None)
+            if own_value != other_value:
+                return False
+
+        return True
+
+    def __ne__(self, other):
+        return not (self == other)
+
+
+class FakeFactory(object):
+    __TYPES = {}
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def create(qname):
+        return FakeObject(qname.split(':')[-1])
+
+    @property
+    def resolver(self):
+        return self
+
+    @classmethod
+    def _get_registry(cls):
+        if cls.__TYPES:
+            return cls.__TYPES
+
+        children = dict(
+            a=None,
+            i=None,
+            n=None,
+            none=None,
+            m=None,
+            s=None,
+            t=None,
+            f=None,
+            child="Class",
+            children="Class",
+            z=None,
+        )
+        class_ = FakeSXType("Class", children)
+        otherclass = FakeSXType("OtherClass", children)
+        cls.__TYPES["Class"] = class_
+        cls.__TYPES["OtherClass"] = otherclass
+        return cls.__TYPES
+
+    @staticmethod
+    def find(qname):
+        sname = qname.split(':')[-1]
+        registry = FakeFactory._get_registry()
+        return registry.get(sname)
+
+
 class VimUtilTest(base.TestCase):
     """Test class for utility methods in vim_util."""
 
@@ -527,3 +652,54 @@ class VimUtilTest(base.TestCase):
         self.assertEqual({"test_name_0": "test_val_0",
                           "test_name_1": "test_val_1"},
                          vim_util.propset_dict(mock_propset))
+
+    def test_serialize_object_managed_object_none(self):
+        class_ = mock.NonCallableMagicMock(__name__="ManagedObjectReference")
+        obj = mock.NonCallableMagicMock(value=None, __class__=class_)
+        self.assertEqual(None, vim_util.serialize_object(obj))
+
+    @staticmethod
+    def _deserialize_test_fixtures():
+        return [
+            ("Empty default class",
+             {},
+             FakeObject()),
+            ("Empty derived class",
+             {"class": "OtherClass"},
+             FakeObject("OtherClass")),
+            ("Do not drop non-defaults",
+             {'a': 'A', 'n': 0, 'i': 1, 's': "", 't': True, 'f': False,
+              'child': {'class': 'OtherClass'}, 'z': 'Z'},
+             FakeObject(a='A', n=0, i=1, s="", t=True, f=False,
+                        child=FakeObject("OtherClass"),
+                        z='Z')),
+            ("Nested object",
+             {'child': {'n': 1}, 'n': 0, },
+             FakeObject(n=0, child=FakeObject(n=1)),),
+            ("Nested object list",
+             {'children': [{'n': 1}], 'n': 0, },
+             FakeObject(n=0, children=[FakeObject(n=1)])),
+            ("Nested derived class",
+             {'child': {"class": "OtherClass", 'n': 1}, 'n': 0, },
+             FakeObject(n=0, child=FakeObject("OtherClass", n=1)),),
+            ("Nested derived class list",
+             {'children': [{"class": "OtherClass", 'n': 1}], 'n': 0, },
+             FakeObject(n=0, children=[FakeObject("OtherClass", n=1)]))]
+
+    @staticmethod
+    def _serialize_test_fixtures():
+        return VimUtilTest._deserialize_test_fixtures() + [
+            ("Drop default",
+             {'a': 'A', 'z': 'Z', },
+             FakeObject(a='A', none=None, m=[], child=FakeObject(), z='Z'))]
+
+    def test_serialize(self):
+        for msg, d, obj in self._serialize_test_fixtures():
+            ser = vim_util.serialize_object(obj, True, FakeObject.DEFAULT_TYPE)
+            self.assertEqual(d, ser, msg)
+
+    def test_deserialize(self):
+        cf = FakeFactory()
+        for msg, d, obj in self._deserialize_test_fixtures():
+            res = vim_util.deserialize_object(cf, d, FakeObject.DEFAULT_TYPE)
+            self.assertEqual(obj, res, msg)

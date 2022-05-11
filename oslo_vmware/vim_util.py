@@ -679,22 +679,126 @@ def is_vim_instance(o, vim_type_name):
                                                      sudsobject.Object))
 
 
-def serialize_object(obj):
-    """Convert Suds object into a dict."""
+def _get_child_type(sxtype, name):
+    if not sxtype:
+        return None
+    child, _ = sxtype.get_child(name)
+    return child.type[0]
+
+
+def serialize_object(obj, typed=False, expected_type=None):
+    """Serialize a SOAP object to a dict
+
+    For the function to serialize it in a format that the corresponding
+    deserialize_object can restore the original object, it needs to get
+    passed typed=True.
+
+    Additionally, if the argument is potentially derived from
+    some other type, then also expected_type as string:
+    If the object is of such a derived class, it adds the "class" field with
+    the name of the class to the dict.
+    That way, the deserializer can reconstruct the correct type.
+    This also applies to member variables of the passed object.
+
+    Any empty object/list/dictionary will not be serialized
+    :param obj:   The SOAP object to be serialized
+    :param typed: Required for deserializing polymorph objects.
+                  Should the resulting dict be annotated with field "class",
+                  if the actual class does not match expected_type
+    :param expected_type: The expected type name (without namespace) of the
+                  argument passed as "obj".
+    :return:      dictionary representing the serialized object without empty
+                  default values
+    """
+    if obj is None:
+        return None
+
+    if (obj.__class__.__name__ == 'ManagedObjectReference' and
+            not obj.value):
+        # Special case for suds, which creates "empty" references
+        # as a value object with an empty string
+        return None
+
     d = {}
+    if not typed or "sxtype" not in obj.__metadata__:
+        sxtype = None
+    else:
+        sxtype = obj.__metadata__["sxtype"]
+        if expected_type and sxtype.name != expected_type:
+            d["class"] = sxtype.name
+
     for k, v in dict(obj).items():
-        if hasattr(v, '__keylist__'):
-            d[k] = serialize_object(v)
-        elif isinstance(v, list):
-            d[k] = []
+        if hasattr(v, "__keylist__"):
+            expected_type = _get_child_type(sxtype, k)
+            ser = serialize_object(v, typed=typed, expected_type=expected_type)
+            if not typed or ser:
+                d[k] = ser
+        elif isinstance(v, list):  # dicts are simply objects
+            expected_type = _get_child_type(sxtype, k)
+            ser = []
             for item in v:
-                if hasattr(item, '__keylist__'):
-                    d[k].append(serialize_object(item))
+                if hasattr(item, "__keylist__"):
+                    ser.append(
+                        serialize_object(item, typed=typed,
+                                         expected_type=expected_type))
                 else:
-                    d[k].append(item)
+                    ser.append(item)
+            if not typed or ser:
+                d[k] = ser
         else:
-            d[k] = v
+            if not typed or v is not None:
+                d[k] = v
     return d
+
+
+def deserialize_object(factory, serialized, typename):
+    """"Deserialize a dict to a SOAP object
+
+    :param factory: The client factory to create a SOAP object out of name
+                    (vim.client.factory)
+    :param serialized: The dict containing the serialized object
+    :param typename: A string with the name of the expected type of the object
+                     (without namespace)
+    """
+    if serialized is None:
+        return serialized
+
+    if typename == "ManagedObjectReference":
+        # Special case: It is a simpleContent object (the only in the wsdl)
+        return get_moref(serialized["value"], serialized["_type"])
+
+    typename = serialized.get("class", typename)
+    qtypename = "ns0:{}".format(typename)
+    obj = factory.create(qtypename)
+    try:
+        sxtype = obj.__metadata__["sxtype"]
+    except AttributeError:
+        sxtype = factory.resolver.find(qtypename)
+
+    # We are iterating here over all children instead of all elements
+    # in the dict, because the factory method from suds above creates
+    # an "empty" object for an optional value, which is not rendered
+    # back to an empty value in the request.
+    # By setting all the unset values explicitly to None, we work around
+    # that
+    for child, _ in sxtype.children():
+        v = serialized.get(child.name, None)
+
+        if isinstance(v, list):
+            if not v or not isinstance(v[0], dict):
+                deserialized = v
+            else:
+                type_ = child.type[0]
+                deserialized = [deserialize_object(factory, i, type_)
+                                for i in v]
+        elif isinstance(v, dict):
+            type_ = child.type[0]
+            deserialized = deserialize_object(factory, v, type_)
+        else:
+            deserialized = v
+
+        setattr(obj, child.name, deserialized)
+    return obj
 
 
 def storage_placement_spec(client_factory,
