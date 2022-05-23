@@ -190,7 +190,7 @@ class ImageTransferUtilityTest(base.TestCase):
         tar.extractfile.side_effect = [ovf_handle, vmdk_handle]
 
         ova_handle = mock.sentinel.ova_handle
-        ret = image_transfer._get_vmdk_handle(ova_handle)
+        ret, size = image_transfer._get_vmdk_handle(ova_handle)
 
         self.assertEqual(vmdk_handle, ret)
         tar_open.assert_called_once_with(mode="r|", fileobj=ova_handle)
@@ -208,7 +208,7 @@ class ImageTransferUtilityTest(base.TestCase):
         tar_open.return_value = tar
 
         ova_handle = mock.sentinel.ova_handle
-        ret = image_transfer._get_vmdk_handle(ova_handle)
+        ret, size = image_transfer._get_vmdk_handle(ova_handle)
 
         self.assertIsNone(ret)
         tar_open.assert_called_once_with(mode="r|", fileobj=ova_handle)
@@ -235,10 +235,11 @@ class ImageTransferUtilityTest(base.TestCase):
 
         if container == 'ova':
             if invalid_ova:
-                get_vmdk_handle.return_value = None
+                get_vmdk_handle.return_value = None, None
             else:
                 vmdk_handle = mock.sentinel.vmdk_handle
-                get_vmdk_handle.return_value = vmdk_handle
+                get_vmdk_handle.return_value = (vmdk_handle,
+                                                mock.sentinel.image_size)
 
         imported_vm = mock.sentinel.imported_vm
         download_stream_optimized_data.return_value = imported_vm
