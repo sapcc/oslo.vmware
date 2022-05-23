@@ -254,10 +254,14 @@ def download_stream_optimized_image(context, timeout_secs, image_service,
             LOG.debug(e)
 
     if url_handle:
-        imported_vm = image_pull_from_url(url_handle, **kwargs)
-        LOG.debug("Downloaded image: %s from image direct URL as a stream "
-                  "optimized file.")
-        return imported_vm
+        try:
+            imported_vm = image_pull_from_url(url_handle, **kwargs)
+            LOG.debug("Downloaded image: %s from image direct URL as a stream "
+                      "optimized file.")
+            return imported_vm
+        except exceptions.VimFaultException as e:
+            LOG.warning("Failed to pull the image directly from URL. Falling "
+                        "back to uploading the image to the HttpNfcLease.", e)
 
     # TODO(vbala) catch specific exceptions raised by download call
     read_iter = image_service.download(context, image_id)
