@@ -741,6 +741,18 @@ class VmdkReadHandle(VmdkHandle):
             raise
         finally:
             super(VmdkReadHandle, self).close()
+
+        # This sleep ensures we don't end up with orphan VMDKs.
+        # Even if we closed the read connection properly, if the lease
+        # was not read 100% and the caller calls close() before that,
+        # it seems that VMware doesn't unlock the VMDK file right away.
+        # If the caller would destroy the VM right after this method exits,
+        # it would keep the orphaned vmdk since it still has a lock on it.
+        # 1s-2s of sleep proved that the orphaned VMDK is still there.
+        # After 3s onwards all the VM resources get properly deleted.
+        if self._get_progress() < 100:
+            time.sleep(5)
+
         LOG.debug("Closed VMDK read handle for %s.", self._url)
 
     def _get_progress(self):
