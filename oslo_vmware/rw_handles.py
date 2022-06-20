@@ -727,7 +727,6 @@ class VmdkReadHandle(VmdkHandle):
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException, VimConnectionException
         """
-        self._conn.close()
         try:
             self._release_lease()
         except exceptions.ManagedObjectNotFoundException:
@@ -740,8 +739,11 @@ class VmdkReadHandle(VmdkHandle):
                         exc_info=True)
             raise
         finally:
+            self._conn.close()
+            LOG.warning("Lease is released. Sleeping 30s before closing.")
+            time.sleep(30)
             super(VmdkReadHandle, self).close()
-        LOG.debug("Closed VMDK read handle for %s.", self._url)
+        LOG.warning("Closed VMDK read handle for %s.", self._url)
 
     def _get_progress(self):
         return float(self._bytes_read) / self._vmdk_size * 100
