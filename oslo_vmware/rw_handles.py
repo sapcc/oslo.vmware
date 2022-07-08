@@ -23,6 +23,7 @@ glance server.
 
 import logging
 import OpenSSL
+import socket
 import ssl
 import time
 
@@ -721,13 +722,26 @@ class VmdkReadHandle(VmdkHandle):
     def tell(self):
         return self._bytes_read
 
+    def _shutdown_connection(self):
+        """Gracefully shuts down the socket of the HTTP(S) connection"""
+        # HTTPSConnection wraps the TCP socket into an SSL transport,
+        # which needs to be shutdown first.
+        if 'WrappedSocket' in type(self._conn.sock).__name__:
+            _socket = self._conn.sock.socket
+            self._conn.sock.shutdown()
+        else:
+            _socket = self._conn.sock
+        _socket.shutdown(socket.SHUT_RDWR)
+
+        self._conn.close()
+
     def close(self):
         """Releases the lease and close the connection.
 
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException, VimConnectionException
         """
-        self._conn.close()
+        self._shutdown_connection()
         try:
             self._release_lease()
         except exceptions.ManagedObjectNotFoundException:
