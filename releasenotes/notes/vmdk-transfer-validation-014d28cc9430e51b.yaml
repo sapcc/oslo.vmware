@@ -1,5 +1,0 @@
----
-fixes:
-  - |
-    Incomplete VMDK upload during ImportVApp is falsely marked as successful
-    leading to a corrupted VM.
