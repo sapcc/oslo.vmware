@@ -381,16 +381,19 @@ def image_pull_from_url(url_handle, **kwargs):
             kwargs.get('session'), kwargs.get('resource_pool'),
             kwargs.get('vm_import_spec'), kwargs.get('vm_folder'))
 
+    # True if PUT should be used for upload, otherwise POST.
+    create = kwargs.get('http_method', 'PUT') == 'PUT'
     try:
         return upgrade_lease_to_pull_mode(
-            session, lease, lease_info, url_handle, size)
+            session, lease, lease_info, url_handle, size, create)
     finally:
         session.invoke_api(session.vim,
                            'HttpNfcLeaseComplete',
                            lease)
 
 
-def upgrade_lease_to_pull_mode(session, lease, lease_info, url_handle, size):
+def upgrade_lease_to_pull_mode(session, lease, lease_info, url_handle, size,
+                               create):
     if not lease_info.deviceUrl:
         raise Exception("Invalid HttpNfc lease. "
                         "No DeviceURLs found to import to.")
@@ -401,7 +404,7 @@ def upgrade_lease_to_pull_mode(session, lease, lease_info, url_handle, size):
     file_spec = client_factory.create("ns0:HttpNfcLeaseSourceFile")
     file_spec.targetDeviceId = import_key
     file_spec.url = url_handle.url()
-    file_spec.create = True
+    file_spec.create = create
     file_spec.sslThumbprint = url_handle.ssl_thumbprint()
     if size:
         file_spec.size = size
