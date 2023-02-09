@@ -395,6 +395,10 @@ class VmdkHandle(FileHandle):
         """Get current progress for updating progress to lease."""
         pass
 
+    def set_size(self, vmdk_size):
+        """Method for updating the vmdk size for testing progress completion"""
+        self._vmdk_size = vmdk_size
+
     def update_progress(self):
         """Updates progress to lease.
 
