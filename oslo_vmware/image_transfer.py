@@ -216,7 +216,8 @@ def _get_vmdk_handle(ova_handle):
                     tar.extractfile(tar_info))
             elif vmdk_name and tar_info.name.startswith(vmdk_name):
                 # Actual file name is <vmdk_name>.XXXXXXX
-                return tar.extractfile(tar_info)
+                return tar.extractfile(tar_info), tar_info.size
+    return None, None
 
 
 def download_stream_optimized_image(context, timeout_secs, image_service,
@@ -269,10 +270,11 @@ def download_stream_optimized_image(context, timeout_secs, image_service,
     read_handle = rw_handles.ImageReadHandle(read_iter)
 
     if container_format == 'ova':
-        read_handle = _get_vmdk_handle(read_handle)
+        read_handle, size = _get_vmdk_handle(read_handle)
         if read_handle is None:
             raise exceptions.ImageTransferException(
                 _("No vmdk found in the OVA image %s.") % image_id)
+        kwargs['image_size'] = size
 
     imported_vm = download_stream_optimized_data(context, timeout_secs,
                                                  read_handle, **kwargs)
