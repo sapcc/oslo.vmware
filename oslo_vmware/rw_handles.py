@@ -848,7 +848,7 @@ class UrlPullHandle(object):
                                            urlinfo.port or 443))
         x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM,
                                                cert)
-        return x509.digest("sha1")
+        return x509.digest("sha1").decode("utf-8")
 
 
 class SwiftUrlPullHandle(UrlPullHandle):
