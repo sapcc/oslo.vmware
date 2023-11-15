@@ -22,13 +22,13 @@ from oslo_vmware.tests import base
 from oslo_vmware import vim_util
 
 
-class FakeSXTypeDesc(object):
+class FakeSXTypeDesc:
     def __init__(self, name, type):
         self.name = name
         self.type = [type]
 
 
-class FakeSXType(object):
+class FakeSXType:
     def __init__(self, name, children):
         self.name = name
         self._children = [
@@ -51,7 +51,7 @@ class FakeSXType(object):
         return self.name == other.name
 
 
-class FakeObject(object):
+class FakeObject:
     DEFAULT_TYPE = "Class"
 
     def __init__(self, type=None, **members):
@@ -102,7 +102,7 @@ class FakeObject(object):
         return not (self == other)
 
 
-class FakeFactory(object):
+class FakeFactory:
     __TYPES = {}
 
     def __init__(self):

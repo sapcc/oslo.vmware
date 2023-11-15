@@ -822,7 +822,7 @@ class ImageReadHandle:
         return "Image read handle"
 
 
-class UrlPullHandle(object):
+class UrlPullHandle:
     """Base class for a URL from where VMware can download VMDKs
 
     This kind of handles are being used in conjunction with
@@ -853,7 +853,7 @@ class SwiftUrlPullHandle(UrlPullHandle):
     SWIFT_PREFIX = "swift+"
 
     def __init__(self, direct_url, auth_token):
-        super(SwiftUrlPullHandle, self).__init__()
+        super().__init__()
         self._auth_token = auth_token
         self._url = None
 
