@@ -16,13 +16,15 @@
 import json
 import suds.sudsobject
 
+from oslo_utils import strutils
 from oslo_vmware import vim_util
 
 
 class _JsonPrinter(object):
     def tostr(self, obj, indent=-2):
         """Get s string representation of object."""
-        return json.dumps(vim_util.serialize_object(obj),
+        obj_dict = vim_util.serialize_object(obj)
+        return json.dumps(strutils.mask_dict_password(obj_dict),
                           default=str)
 
 
