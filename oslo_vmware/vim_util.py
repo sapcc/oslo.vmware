@@ -17,6 +17,7 @@
 The VMware API utility module.
 """
 
+import operator
 import logging
 
 from oslo_utils import timeutils
@@ -843,3 +844,121 @@ def dict_to_kv(client_factory, dict_param):
 
     return [_convert(k, v)
             for k, v in dict_param.items()]
+
+
+def get_array_items(array_obj):
+    """Get contained items if the object is a vSphere API array."""
+    array_prefix = 'ArrayOf'
+    if array_obj.__class__.__name__.startswith(array_prefix):
+        attr_name = array_obj.__class__.__name__.replace(array_prefix, '', 1)
+        if hasattr(array_obj, attr_name):
+            return getattr(array_obj, attr_name)
+    return array_obj
+
+
+class HistoryCollectorItems(object):
+
+    def __init__(self, session, history_collector, read_page_method,
+                 reverse_page_order=False, max_page_size=10,
+                 page_sort_key_func=None):
+        self.session = session
+        self.history_collector = history_collector
+        self.read_page_method = read_page_method
+        self.reverse_page_order = reverse_page_order
+        self.max_page_size = max_page_size
+        self.page_sort_key_func = page_sort_key_func
+
+    def __iter__(self):
+        self._latest_page_read = False
+        self._page_items = None
+
+        if self.reverse_page_order:
+            self.session.invoke_api(self.session.vim,
+                                    "ResetCollector",
+                                    self.history_collector)
+        else:
+            self.session.invoke_api(self.session.vim,
+                                    "RewindCollector",
+                                    self.history_collector)
+
+        return self
+
+    def __next__(self):
+        if not self._page_items:
+            self._load_page()
+
+        if not self._page_items:
+            raise StopIteration
+        else:
+            return self._page_items.pop(0)
+
+    def _load_page(self):
+        if self.reverse_page_order and not self._latest_page_read:
+            self._load_latest_page()
+
+        if not self._page_items:
+            self._page_items = self.session.invoke_api(
+                self.session.vim, self.read_page_method,
+                self.history_collector, maxCount=self.max_page_size)
+
+        if self._page_items and self.page_sort_key_func:
+            self._page_items.sort(reverse=self.reverse_page_order,
+                                  key=self.page_sort_key_func)
+
+    def _load_latest_page(self):
+        self._latest_page_read = True
+        latest_page = get_object_property(self.session.vim,
+                                          self.history_collector,
+                                          "latestPage")
+
+        self._page_items = get_array_items(latest_page)
+
+    def destroy_collector(self):
+        if self.history_collector:
+            self.session.invoke_api(self.session.vim,
+                                    "DestroyCollector",
+                                    self.history_collector)
+
+
+class TaskHistoryCollectorItems(HistoryCollectorItems):
+    def __init__(self, session, task_filter_spec, reverse_page_order=False,
+                 max_page_size=10):
+        task_collector = session.invoke_api(
+            session.vim,
+            "CreateCollectorForTasks",
+            session.vim.service_content.taskManager,
+            filter=task_filter_spec)
+        read_page_method = ("ReadPreviousTasks" if reverse_page_order
+                            else "ReadNextTasks")
+        page_sort_key_func = operator.attrgetter('queueTime')
+        super(TaskHistoryCollectorItems, self).__init__(session,
+                                                        task_collector,
+                                                        read_page_method,
+                                                        reverse_page_order,
+                                                        max_page_size,
+                                                        page_sort_key_func)
+
+    def __del__(self):
+        self.destroy_collector()
+
+
+class EventHistoryCollectorItems(HistoryCollectorItems):
+    def __init__(self, session, event_filter_spec, reverse_page_order=False,
+                 max_page_size=10):
+        event_collector = session.invoke_api(
+            session.vim,
+            "CreateCollectorForEvents",
+            session.vim.service_content.eventManager,
+            filter=event_filter_spec)
+        read_page_method = ("ReadPreviousEvents" if reverse_page_order
+                            else "ReadNextEvents")
+        page_sort_key_func = operator.attrgetter('createdTime')
+        super(EventHistoryCollectorItems, self).__init__(session,
+                                                         event_collector,
+                                                         read_page_method,
+                                                         reverse_page_order,
+                                                         max_page_size,
+                                                         page_sort_key_func)
+
+    def __del__(self):
+        self.destroy_collector()
