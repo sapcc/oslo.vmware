@@ -21,7 +21,11 @@ automatic session re-establishment and retry of API invocations
 in case of connection problems or server API call overload.
 """
 
+from concurrent import futures
 import logging
+import queue
+import threading
+import weakref
 
 from oslo_concurrency import lockutils
 from oslo_context import context
@@ -38,11 +42,31 @@ from oslo_vmware import vim_util
 
 LOG = logging.getLogger(__name__)
 
+# Seconds a WaitForUpdatesEx call blocks for before returning without
+# updates, and thus how long newly queued tasks wait to be monitored.
+WAIT_FOR_UPDATES_MAX_WAIT_SECONDS = 1
+
 
 def _trunc_id(session_id):
     """Returns truncated session id which is suitable for logging."""
     if session_id is not None:
         return session_id[-5:]
+
+
+def _fail_tasks(running_tasks, new_tasks, excep):
+    """Fail the tasks monitored by the property collector thread.
+
+    :param running_tasks: dict mapping task moref values to
+                          (future, context, property filter)
+    :param new_tasks: list of (task moref value, future, context)
+    :param excep: exception to fail the tasks with
+    """
+    for task_future, _ctx, _filter in running_tasks.values():
+        task_future.set_exception(excep)
+    for _task_value, task_future, _ctx in new_tasks:
+        task_future.set_exception(excep)
+    running_tasks.clear()
+    new_tasks.clear()
 
 
 # TODO(vbala) Move this class to excutils.py.
@@ -139,7 +163,8 @@ class VMwareAPISession:
                  api_retry_count, task_poll_interval, scheme='https',
                  create_session=True, wsdl_loc=None, pbm_wsdl_loc=None,
                  port=443, cacert=None, insecure=True, pool_size=10,
-                 connection_timeout=None, op_id_prefix='oslo.vmware'):
+                 connection_timeout=None, op_id_prefix='oslo.vmware',
+                 use_property_collector_for_tasks=False):
         """Initializes the API session with given parameters.
 
         :param host: ESX/VC server IP address or host name
@@ -164,6 +189,10 @@ class VMwareAPISession:
         :param connection_timeout: Maximum time in seconds to wait for peer to
                                    respond.
         :param op_id_prefix: String prefix for the operation ID.
+        :param use_property_collector_for_tasks: Use WaitForUpdatesEx-based
+                                                 property collector for
+                                                 task monitoring instead
+                                                 of polling
         :raises: VimException, VimFaultException, VimAttributeException,
                  VimSessionOverLoadException
         """
@@ -185,8 +214,24 @@ class VMwareAPISession:
         self._pool_size = pool_size
         self._connection_timeout = connection_timeout
         self._op_id_prefix = op_id_prefix
+
+        self._use_property_collector_for_tasks = (
+            use_property_collector_for_tasks)
+        # The queue is all that is shared with the property collector
+        # thread: wait_for_task() puts (task moref value, future, context)
+        # tuples, None asks the thread to stop.
+        self._pending_tasks = queue.Queue()
+        # Set by the property collector thread once it stops taking tasks.
+        self._property_collector_stopped = threading.Event()
+        self._property_collector_thread = None
+        if use_property_collector_for_tasks:
+            self._start_property_collector_thread()
+
         if create_session:
             self._create_session()
+
+    def __del__(self):
+        self._stop_property_collector_thread()
 
     def pbm_wsdl_loc_set(self, pbm_wsdl_loc):
         self._pbm_wsdl_loc = pbm_wsdl_loc
@@ -259,6 +304,319 @@ class VMwareAPISession:
         if self._pbm is not None:
             self._pbm.set_soap_cookie(self._vim.get_http_cookie())
 
+    def _start_property_collector_thread(self):
+        """Start the background thread monitoring tasks."""
+        # The thread must not hold a strong reference to the session:
+        # the session could never be garbage collected while the thread
+        # runs, so __del__ would never get the chance to stop it.
+        self._property_collector_thread = threading.Thread(
+            target=self._property_collector_loop,
+            args=(weakref.ref(self), self._pending_tasks,
+                  self._property_collector_stopped),
+            name='property-collector-%s' % self._host,
+            daemon=True)
+        self._property_collector_thread.start()
+
+    def _stop_property_collector_thread(self):
+        """Stop the background thread monitoring tasks."""
+        thread = getattr(self, '_property_collector_thread', None)
+        if thread is None:
+            return
+        LOG.debug("Stopping property collector thread.")
+        self._pending_tasks.put(None)
+        thread.join()
+        self._property_collector_thread = None
+
+    @staticmethod
+    def _property_collector_loop(session_ref, pending_tasks, stopped):
+        """Monitor tasks with a property collector until asked to stop.
+
+        This runs in the background thread. All property collector state
+        is local to this function; tasks arrive through pending_tasks and
+        their outcome is delivered through the future they carry. A None
+        item in the queue stops the thread.
+
+        A failing property collector is created anew once, keeping the
+        monitored tasks. If it fails again, the monitored tasks fail with
+        that error and the thread goes on to wait for new tasks. Errors not
+        coming from vCenter fail the monitored tasks right away.
+
+        :param session_ref: weak reference to the VMwareAPISession
+        :param pending_tasks: queue of (task moref value, future, context)
+        :param stopped: event set once the thread stops taking tasks
+        """
+        LOG.debug("Property collector thread started.")
+        property_collector = None
+        version = ''
+        # Maps task moref value -> (future, context, property filter)
+        running_tasks = {}
+        # (task moref value, future, context) of tasks without a filter yet
+        new_tasks = []
+        failures = 0
+        session = None
+        try:
+            while True:
+                if not running_tasks and not new_tasks:
+                    # Nothing to monitor: block until a task arrives. Drop
+                    # the session reference meanwhile, so that the session
+                    # can be garbage collected.
+                    session = None
+                    task_data = pending_tasks.get()
+                    if task_data is None:
+                        return
+                    new_tasks.append(task_data)
+                while True:
+                    try:
+                        task_data = pending_tasks.get_nowait()
+                    except queue.Empty:
+                        break
+                    if task_data is None:
+                        return
+                    new_tasks.append(task_data)
+
+                session = session_ref()
+                if session is None:
+                    return
+
+                try:
+                    if property_collector is None:
+                        property_collector = (
+                            session._create_property_collector())
+                        version = ''
+                        # The filters of the running tasks belonged to the
+                        # previous collector, so create them again.
+                        new_tasks.extend(
+                            (task_value, task_future, ctx)
+                            for task_value, (task_future, ctx, _filter)
+                            in running_tasks.items())
+                        running_tasks.clear()
+
+                    while new_tasks:
+                        # The task stays in new_tasks until it has a filter,
+                        # so that it is failed along with the others if the
+                        # filter creation raises an unexpected error.
+                        task_value, task_future, ctx = new_tasks[0]
+                        try:
+                            task_filter = session._create_task_filter(
+                                property_collector, task_value)
+                        except exceptions.VMwareDriverException as excep:
+                            LOG.warning("Failed to create property filter "
+                                        "for task %(task)s: %(error)s",
+                                        {'task': task_value,
+                                         'error': excep})
+                            # The collector may be stale, e.g. when the
+                            # session was re-created: create it anew for
+                            # the other tasks.
+                            session._destroy_property_collector(
+                                property_collector)
+                            property_collector = None
+                            del new_tasks[0]
+                            task_future.set_exception(excep)
+                            break
+                        del new_tasks[0]
+                        running_tasks[task_value] = (task_future, ctx,
+                                                     task_filter)
+
+                    if property_collector is None or not running_tasks:
+                        continue
+                    update_set = session._wait_for_updates(
+                        property_collector, version)
+                    failures = 0
+                    if update_set:
+                        version = update_set.version
+                        session._process_task_updates(update_set,
+                                                      running_tasks)
+                except exceptions.VMwareDriverException as excep:
+                    failures += 1
+                    LOG.warning("Property collector failed (%(count)d "
+                                "consecutive failure(s)): %(error)s",
+                                {'count': failures, 'error': excep})
+                    if property_collector is not None:
+                        session._destroy_property_collector(
+                            property_collector)
+                        property_collector = None
+                    if failures > 1:
+                        _fail_tasks(running_tasks, new_tasks, excep)
+                        failures = 0
+                except Exception as excep:
+                    # Not an error of the vCenter API, but most likely a bug,
+                    # e.g. in handling an update, which a new collector would
+                    # run into again. So fail the tasks right away, but keep
+                    # the thread alive: if it died, every task of the session
+                    # would fail from then on.
+                    LOG.exception("Unexpected error in the property "
+                                  "collector thread.")
+                    if property_collector is not None:
+                        session._destroy_property_collector(
+                            property_collector)
+                        property_collector = None
+                    _fail_tasks(running_tasks, new_tasks,
+                                exceptions.VimException(
+                                    _("Error while monitoring the task."),
+                                    excep))
+                    failures = 0
+        finally:
+            # Refuse tasks queued from now on; the ones already queued
+            # are failed below.
+            stopped.set()
+            while True:
+                try:
+                    task_data = pending_tasks.get_nowait()
+                except queue.Empty:
+                    break
+                if task_data is not None:
+                    new_tasks.append(task_data)
+            _fail_tasks(running_tasks, new_tasks, exceptions.VimException(
+                _("Property collector thread stopped.")))
+            LOG.debug("Property collector thread stopped.")
+
+    def _create_property_collector(self):
+        """Create a property collector for the current session.
+
+        :returns: managed object reference of the property collector
+        """
+        property_collector = self.invoke_api(
+            self.vim, 'CreatePropertyCollector',
+            self.vim.service_content.propertyCollector)
+        LOG.debug("Created property collector: %s",
+                  vim_util.get_moref_value(property_collector))
+        return property_collector
+
+    def _destroy_property_collector(self, property_collector):
+        """Destroy a property collector along with its filters.
+
+        :param property_collector: managed object reference of the
+                                   property collector
+        """
+        try:
+            self.invoke_api(self.vim, 'DestroyPropertyCollector',
+                            property_collector)
+        except exceptions.VMwareDriverException as excep:
+            LOG.warning("Error destroying property collector %(pc)s: "
+                        "%(error)s",
+                        {'pc': vim_util.get_moref_value(property_collector),
+                         'error': excep})
+
+    def _create_task_filter(self, property_collector, task_value):
+        """Create a property filter for the info property of a task.
+
+        :param property_collector: managed object reference of the
+                                   property collector
+        :param task_value: task moref value
+        :returns: managed object reference of the property filter
+        """
+        client_factory = self.vim.client.factory
+        property_spec = vim_util.build_property_spec(
+            client_factory,
+            type_='Task',
+            properties_to_collect=['info'])
+        object_spec = vim_util.build_object_spec(
+            client_factory,
+            vim_util.get_moref(task_value, 'Task'),
+            [])
+        property_filter_spec = vim_util.build_property_filter_spec(
+            client_factory,
+            [property_spec],
+            [object_spec])
+        LOG.debug("Creating property filter for task: %s.", task_value)
+        return self.invoke_api(self.vim, 'CreateFilter',
+                               property_collector,
+                               spec=property_filter_spec,
+                               partialUpdates=False)
+
+    def _destroy_task_filter(self, task_value, task_filter):
+        """Destroy the property filter of a task.
+
+        :param task_value: task moref value
+        :param task_filter: managed object reference of the property filter
+        """
+        try:
+            self.invoke_api(self.vim, 'DestroyPropertyFilter', task_filter)
+        except exceptions.VMwareDriverException as excep:
+            LOG.warning("Error destroying property filter of task "
+                        "%(task)s: %(error)s",
+                        {'task': task_value, 'error': excep})
+
+    def _wait_for_updates(self, property_collector, version):
+        """Wait for updates of the filters of a property collector.
+
+        :param property_collector: managed object reference of the
+                                   property collector
+        :param version: the property collector version to wait from
+        :returns: UpdateSet, or None if there was no update in time
+        """
+        options = self.vim.client.factory.create('ns0:WaitOptions')
+        options.maxWaitSeconds = WAIT_FOR_UPDATES_MAX_WAIT_SECONDS
+        # we wait for updates too often, so skip logging the opID as it
+        # generates too much noise in the logs
+        return self.invoke_api(self.vim, 'WaitForUpdatesEx',
+                               property_collector,
+                               version=version,
+                               options=options,
+                               skip_op_id=True)
+
+    def _process_task_updates(self, update_set, running_tasks):
+        """Deliver task updates to the futures of the running tasks.
+
+        Finished tasks are removed from running_tasks and their filter
+        is destroyed.
+
+        :param update_set: UpdateSet returned by WaitForUpdatesEx
+        :param running_tasks: dict mapping task moref values to
+                              (future, context, property filter)
+        """
+        for filter_update in update_set.filterSet or []:
+            for obj_update in filter_update.objectSet or []:
+                task_value = vim_util.get_moref_value(obj_update.obj)
+                if task_value not in running_tasks:
+                    continue
+                task_future, ctx, task_filter = running_tasks[task_value]
+
+                task_info = None
+                for change in getattr(obj_update, 'changeSet', None) or []:
+                    if (change.name == 'info' and
+                            change.op in ('assign', 'modify')):
+                        task_info = getattr(change, 'val', None)
+                        break
+                if not task_info:
+                    continue
+
+                if ctx is not None:
+                    ctx.update_store()
+                task_detail = {'id': task_value}
+                # some internal tasks do not have 'name' set
+                if getattr(task_info, 'name', None):
+                    task_detail['name'] = task_info.name
+
+                if task_info.state in ['queued', 'running']:
+                    if hasattr(task_info, 'progress'):
+                        LOG.debug("Task: %(task)s progress is %(progress)s%%.",
+                                  {'task': task_detail,
+                                   'progress': task_info.progress})
+                    continue
+
+                if task_info.state == 'success':
+                    complete_time = getattr(task_info, 'completeTime', None)
+                    if complete_time:
+                        duration = complete_time - task_info.queueTime
+                        task_detail['duration_secs'] = duration.total_seconds()
+                    LOG.debug("Task: %s completed successfully.", task_detail)
+                    result = task_info
+                    error = None
+                else:
+                    LOG.debug("Task: %(task)s entered state: %(state)s.",
+                              {'task': task_detail, 'state': task_info.state})
+                    result = None
+                    error = exceptions.translate_fault(task_info.error)
+
+                del running_tasks[task_value]
+                self._destroy_task_filter(task_value, task_filter)
+                if error is None:
+                    task_future.set_result(result)
+                else:
+                    task_future.set_exception(error)
+
+    @lockutils.synchronized('oslo_vmware_api_lock')
     def logout(self):
         """Log out and terminate the current session."""
         if self._session_id:
@@ -385,6 +743,43 @@ class VMwareAPISession:
         The task is polled until it is done. The method returns the task
         information upon successful completion. In case of any error,
         appropriate exception is raised.
+
+        :param task: managed object reference of the task
+        :returns: task info upon successful completion of the task
+        :raises: VimException, VimFaultException, VimAttributeException,
+                 VimSessionOverLoadException, VimConnectionException
+        """
+        if self._use_property_collector_for_tasks:
+            return self._wait_for_task_with_property_collector(task)
+        else:
+            return self._wait_for_task_with_polling(task)
+
+    def _wait_for_task_with_property_collector(self, task):
+        """Wait for task using centralized property collector.
+
+        Submits the task to the background monitoring thread via
+        the pending tasks queue and waits for the result.
+
+        :param task: managed object reference of the task
+        :returns: task info upon successful completion of the task
+        :raises: VimException, VimFaultException, VimAttributeException,
+                 VimSessionOverLoadException, VimConnectionException
+        """
+        ctx = context.get_current()
+        task_future = futures.Future()
+        task_value = vim_util.get_moref_value(task)
+        self._pending_tasks.put((task_value, task_future, ctx))
+        # The thread sets the event before it fails the queued tasks on
+        # exit, so a task queued after that is never looked at.
+        if (self._property_collector_stopped.is_set() and
+                not task_future.done()):
+            raise exceptions.VimException(
+                _("Property collector thread is not running."))
+        LOG.debug("Waiting for the task: %s to complete.", task)
+        return task_future.result()
+
+    def _wait_for_task_with_polling(self, task):
+        """Wait for task using traditional polling approach.
 
         :param task: managed object reference of the task
         :returns: task info upon successful completion of the task
