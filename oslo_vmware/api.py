@@ -23,6 +23,8 @@ in case of connection problems or server API call overload.
 
 from concurrent import futures
 import logging
+import queue
+import threading
 
 import eventlet
 
@@ -143,7 +145,7 @@ class VMwareAPISession(object):
                  create_session=True, wsdl_loc=None, pbm_wsdl_loc=None,
                  port=443, cacert=None, insecure=True, pool_size=10,
                  connection_timeout=None, op_id_prefix='oslo.vmware',
-                 use_property_collector_for_tasks=False):
+                 use_property_collector_for_tasks=True):
         """Initializes the API session with given parameters.
 
         :param host: ESX/VC server IP address or host name
@@ -294,7 +296,7 @@ class VMwareAPISession(object):
             self._property_collector_running = True
             self._property_collector_version = ""
             self._running_tasks = {}
-            self._pending_tasks = eventlet.Queue()
+            self._pending_tasks = queue.Queue()
 
             try:
                 pc = self.vim.service_content.propertyCollector
@@ -306,8 +308,9 @@ class VMwareAPISession(object):
                 self._property_collector_running = False
                 raise
 
-            self._property_collector_thread = eventlet.spawn(
-                self._property_collector_loop)
+            self._property_collector_thread = threading.Thread(
+                target=self._property_collector_loop)
+            self._property_collector_thread.start()
 
     def _property_collector_loop(self):
         LOG.debug("Property collector thread started.")
@@ -362,7 +365,7 @@ class VMwareAPISession(object):
             if update_set:
                 self._property_collector_version = update_set.version
                 self._process_task_updates(update_set)
-        except Exception:
+        except exceptions.VimException:
             LOG.exception("Error in property collector loop, "
                           "recreating collector.")
             self._recreate_property_collector()
@@ -406,9 +409,9 @@ class VMwareAPISession(object):
             del self._running_tasks[task_value]
             try:
                 self.vim.DestroyPropertyFilter(task_filter)
-            except Exception:
-                LOG.debug("Error destroying property filter for task %s",
-                          task_value, exc_info=True)
+            except exceptions.VimException:
+                LOG.warning("Error destroying property filter for task %s",
+                            task_value, exc_info=True)
 
     def _recreate_property_collector(self):
         """Recreate the property collector after an error.
@@ -433,9 +436,9 @@ class VMwareAPISession(object):
             if self._property_collector:
                 try:
                     self.vim.DestroyPropertyCollector(self._property_collector)
-                except Exception:
-                    LOG.debug("Error destroying old property collector.",
-                              exc_info=True)
+                except exceptions.VimException:
+                    LOG.warning("Error destroying old property collector.",
+                                exc_info=True)
                 self._property_collector = None
 
             pc = self.vim.service_content.propertyCollector
@@ -539,11 +542,7 @@ class VMwareAPISession(object):
             self._pending_tasks.put(None)
 
         if self._property_collector_thread:
-            try:
-                self._property_collector_thread.wait()
-            except Exception:
-                LOG.debug("Error waiting for property collector thread.",
-                          exc_info=True)
+            self._property_collector_thread.join()
             self._property_collector_thread = None
 
         # Clean up property collector
@@ -551,9 +550,9 @@ class VMwareAPISession(object):
             if self._property_collector:
                 try:
                     self.vim.DestroyPropertyCollector(self._property_collector)
-                except Exception:
-                    LOG.debug("Error destroying property collector.",
-                              exc_info=True)
+                except exceptions.VimException:
+                    LOG.warning("Error destroying property collector.",
+                                exc_info=True)
                 self._property_collector = None
                 self._property_collector_filter = None
 
@@ -566,19 +565,23 @@ class VMwareAPISession(object):
                         future.set_exception(
                             exceptions.VimException(
                                 _("Property collector stopped while waiting")))
-                    except Exception:  # nosec
+                    except futures.InvalidStateError:
                         pass
 
             # Notify any remaining waiters in running tasks
             for task_value, (future, ctx, _) in self._running_tasks.items():
-                future.set_exception(
-                    exceptions.VimException(
-                        _("Property collector stopped while waiting for "
-                          "task %s") % task_value))
+                try:
+                    future.set_exception(
+                        exceptions.VimException(
+                            _("Property collector stopped while waiting for "
+                              "task %s") % task_value))
+                except futures.InvalidStateError:
+                    pass
             self._running_tasks = {}
 
         LOG.info("Property collector thread stopped.")
 
+    @lockutils.synchronized('oslo_vmware_api_lock')
     def logout(self):
         """Log out and terminate the current session."""
         if self._use_property_collector_for_tasks:
@@ -734,26 +737,20 @@ class VMwareAPISession(object):
         future = futures.Future()
         task_value = vim_util.get_moref_value(task)
 
-        try:
-            # The write lock is held by the WaitForUpdatesEx, making
-            # sure we don't lose any tasks
-            with self._property_collector_lock.read_lock():
-                if not self._property_collector_running:
-                    raise exceptions.VimException(
-                        _("Property collector was stopped."))
-                task_filter = self._create_task_filter(task)
-                self._pending_tasks.put((task_value, future, ctx, task_filter))
-        except Exception:
-            LOG.exception("Failed to create property filter for task %s",
-                          task_value)
-            raise
+        # The write lock is held by the WaitForUpdatesEx, making
+        # sure we don't lose any tasks
+        with self._property_collector_lock.read_lock():
+            if not self._property_collector_running:
+                raise exceptions.VimException(
+                    _("Property collector was stopped."))
+            task_filter = self._create_task_filter(task)
+            self._pending_tasks.put((task_value, future, ctx, task_filter))
 
         try:
             return future.result()
-        except Exception:
+        finally:
             with self._property_collector_lock.write_lock():
                 self._cleanup_task_filter(task_value)
-            raise
 
     def _wait_for_task_with_polling(self, task):
         """Wait for task using traditional polling approach.
