@@ -19,6 +19,7 @@ Functions and classes for image transfer between ESX/VC & image service.
 
 import logging
 import tarfile
+import time
 
 from eventlet import timeout
 
@@ -54,11 +55,52 @@ def _start_transfer(read_handle, write_handle, timeout_secs):
 
     timer = timeout.Timeout(timeout_secs)
     try:
+        total_bytes = 0
+        chunk_num = 0
+        transfer_start = time.time()
+        last_log_time = transfer_start
         while True:
+            chunk_num += 1
+            t0 = time.time()
             data = read_handle.read(CHUNK_SIZE)
+            t1 = time.time()
+            read_secs = t1 - t0
             if not data:
+                LOG.debug("_start_transfer: read returned empty after "
+                          "%(chunks)d chunks, %(total).2f MB in %(elapsed).1fs",
+                          {'chunks': chunk_num,
+                           'total': total_bytes / (1024 * 1024),
+                           'elapsed': t1 - transfer_start})
                 break
+            data_len = len(data)
             write_handle.write(data)
+            t2 = time.time()
+            write_secs = t2 - t1
+            total_bytes += data_len
+
+            if read_secs > 5 or write_secs > 5 or (t2 - last_log_time) > 60:
+                LOG.info("_start_transfer: chunk #%(num)d: %(size)d bytes, "
+                         "read %(read).3fs, write %(write).3fs, "
+                         "total %(total).2f MB elapsed %(elapsed).1fs",
+                         {'num': chunk_num,
+                          'size': data_len,
+                          'read': read_secs,
+                          'write': write_secs,
+                          'total': total_bytes / (1024 * 1024),
+                          'elapsed': t2 - transfer_start})
+                last_log_time = t2
+                if read_secs > 5:
+                    LOG.warning("_start_transfer: SLOW READ - chunk #%(num)d "
+                                "took %(read).3fs. Write connection was idle.",
+                                {'num': chunk_num, 'read': read_secs})
+        elapsed = time.time() - transfer_start
+        rate = (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+        LOG.info("_start_transfer: completed %(total).2f MB in %(elapsed).1fs "
+                 "(%(rate).2f MB/s), %(chunks)d chunks",
+                 {'total': total_bytes / (1024 * 1024),
+                  'elapsed': elapsed,
+                  'rate': rate,
+                  'chunks': chunk_num})
     except timeout.Timeout as excep:
         msg = (_('Timeout, read_handle: "%(src)s", write_handle: "%(dest)s"') %
                {'src': read_handle,

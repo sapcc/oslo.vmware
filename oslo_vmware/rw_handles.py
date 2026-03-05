@@ -240,6 +240,10 @@ class FileWriteHandle(FileHandle):
         :param thumbprint: expected SHA1 thumbprint of server's certificate
         :raises: VimConnectionException, ValueError
         """
+        self._bytes_written = 0
+        self._file_size = file_size
+        self._last_write_time = None
+
         if not port and not data_center_name and not datastore_name:
             self._url = host_or_url
         else:
@@ -254,6 +258,9 @@ class FileWriteHandle(FileHandle):
                                                    cookies=cookies,
                                                    cacerts=cacerts,
                                                    ssl_thumbprint=thumbprint)
+        self._last_write_time = time.time()
+        LOG.debug("FileWriteHandle: connection established to %s, "
+                  "file_size=%s", self._url, file_size)
         FileHandle.__init__(self, self._conn)
 
     def write(self, data):
@@ -262,19 +269,52 @@ class FileWriteHandle(FileHandle):
         :param data: data to be written
         :raises: VimConnectionException, VimException
         """
+        now = time.time()
+        idle_secs = now - self._last_write_time if self._last_write_time else 0
         try:
+            t0 = time.time()
             self._file_handle.send(data)
+            t1 = time.time()
+            self._bytes_written += len(data)
+            self._last_write_time = t1
+            send_secs = t1 - t0
+            if idle_secs > 5 or send_secs > 2:
+                LOG.warning("FileWriteHandle.write: idle_before=%(idle).3fs, "
+                            "send=%(send).3fs, chunk=%(size)d bytes, "
+                            "total_written=%(total)d/%(file_size)s bytes, "
+                            "url=%(url)s",
+                            {'idle': idle_secs,
+                             'send': send_secs,
+                             'size': len(data),
+                             'total': self._bytes_written,
+                             'file_size': self._file_size,
+                             'url': self._url})
         except requests.RequestException as excep:
             excep_msg = _("Connection error occurred while writing data to"
                           " %s.") % self._url
+            LOG.error("FileWriteHandle.write FAILED: idle_before=%(idle).3fs, "
+                      "chunk=%(size)d bytes, total_written=%(total)d/"
+                      "%(file_size)s bytes, url=%(url)s, error=%(err)s",
+                      {'idle': idle_secs,
+                       'size': len(data),
+                       'total': self._bytes_written,
+                       'file_size': self._file_size,
+                       'url': self._url,
+                       'err': excep})
             LOG.exception(excep_msg)
             raise exceptions.VimConnectionException(excep_msg, excep)
         except Exception as excep:
-            # TODO(vbala) We need to catch and raise specific exceptions
-            # related to connection problems, invalid request and invalid
-            # arguments.
             excep_msg = _("Error occurred while writing data to"
                           " %s.") % self._url
+            LOG.error("FileWriteHandle.write FAILED: idle_before=%(idle).3fs, "
+                      "chunk=%(size)d bytes, total_written=%(total)d/"
+                      "%(file_size)s bytes, url=%(url)s, error=%(err)s",
+                      {'idle': idle_secs,
+                       'size': len(data),
+                       'total': self._bytes_written,
+                       'file_size': self._file_size,
+                       'url': self._url,
+                       'err': excep})
             LOG.exception(excep_msg)
             raise exceptions.VimException(excep_msg, excep)
 
@@ -795,18 +835,55 @@ class ImageReadHandle(object):
         """
         self._glance_read_iter = glance_read_iter
         self._iter = self.get_next()
+        self._bytes_read = 0
+        self._chunk_count = 0
+        self._buffer = b''
 
     def read(self, chunk_size):
-        """Read an item from the image data iterator.
+        """Read a chunk of data from the image data iterator.
 
-        The input chunk size is ignored since the client ImageBodyIterator
-        uses its own chunk size.
+        Respects the requested chunk_size to avoid overwhelming the
+        destination with large writes. Glance iterators may return
+        chunks much larger than what the caller requests, so we buffer
+        internally and yield at most chunk_size bytes per call.
+
+        :param chunk_size: maximum number of bytes to return
         """
         try:
-            data = next(self._iter)
+            # Fill buffer from Glance iterator until we have enough
+            while len(self._buffer) < chunk_size:
+                t0 = time.time()
+                raw = next(self._iter)
+                t1 = time.time()
+                read_secs = t1 - t0
+                if read_secs > 2:
+                    LOG.warning("ImageReadHandle.read: SLOW glance read "
+                                "chunk #%(num)d took %(secs).3fs, "
+                                "%(size)d bytes, total_read=%(total)d bytes",
+                                {'num': self._chunk_count,
+                                 'secs': read_secs,
+                                 'size': len(raw),
+                                 'total': self._bytes_read + len(raw)})
+                self._buffer += raw
+
+            # Return exactly chunk_size bytes
+            self._chunk_count += 1
+            data = self._buffer[:chunk_size]
+            self._buffer = self._buffer[chunk_size:]
+            self._bytes_read += len(data)
             return data
         except StopIteration:
-            LOG.debug("Completed reading data from the image iterator.")
+            # Drain whatever is left in the buffer
+            if self._buffer:
+                self._chunk_count += 1
+                data = self._buffer[:chunk_size]
+                self._buffer = self._buffer[chunk_size:]
+                self._bytes_read += len(data)
+                return data
+            LOG.debug("Completed reading data from the image iterator. "
+                      "%(chunks)d chunks, %(total)d bytes.",
+                      {'chunks': self._chunk_count,
+                       'total': self._bytes_read})
             return ""
 
     def get_next(self):
