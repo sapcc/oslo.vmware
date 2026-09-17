@@ -18,8 +18,9 @@
 
 from concurrent import futures
 from datetime import datetime
-import threading
+import gc
 from unittest import mock
+import weakref
 
 from eventlet import greenthread
 from oslo_context import context
@@ -618,100 +619,319 @@ class VMwareAPISessionTest(base.TestCase):
         api_session.pbm_wsdl_loc_set('fake_wsdl')
         self.assertEqual('fake_wsdl', api_session._pbm_wsdl_loc)
 
-    def _make_update_set(self, task_value, task_info):
-        change = mock.Mock(name='info', op='assign', val=task_info)
-        change.name = 'info'
-        obj_update = mock.Mock()
-        obj_update.obj = vim_util.get_moref(task_value, 'Task')
-        obj_update.changeSet = [change]
-        filter_set = mock.Mock()
-        filter_set.objectSet = [obj_update]
-        update_set = mock.Mock()
-        update_set.filterSet = [filter_set]
-        return update_set
+    def _make_task_info(self, state, **kwargs):
+        kwargs.setdefault('completeTime', None)
+        task_info = mock.Mock(state=state, **kwargs)
+        task_info.name = 'TestTask'
+        return task_info
+
+    def _make_update_set(self, version, task_infos):
+        """Build an UpdateSet like the one returned by WaitForUpdatesEx.
+
+        :param version: property collector version of the update set
+        :param task_infos: dict mapping task moref values to task infos
+        """
+        object_set = []
+        for task_value, task_info in task_infos.items():
+            change = mock.Mock(op='assign', val=task_info)
+            change.name = 'info'
+            obj_update = mock.Mock(obj=vim_util.get_moref(task_value, 'Task'),
+                                   changeSet=[change])
+            object_set.append(obj_update)
+        return mock.Mock(version=version,
+                         filterSet=[mock.Mock(objectSet=object_set)])
+
+    def _create_property_collector_session(self, stop=True):
+        api_session = self._create_api_session(
+            False, use_property_collector_for_tasks=True)
+        if stop:
+            self.addCleanup(api_session._stop_property_collector_thread)
+        vim_obj = api_session.vim
+        vim_obj.CreatePropertyCollector.return_value = vim_util.get_moref(
+            'session[1]', 'PropertyCollector')
+        vim_obj.CreateFilter.return_value = vim_util.get_moref(
+            'session[1]', 'PropertyFilter')
+        return api_session
+
+    def _submit_wait_for_task(self, api_session, task_value):
+        """Call wait_for_task in a thread, so a hang fails the test."""
+        executor = futures.ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(executor.shutdown, wait=False)
+        return executor.submit(api_session.wait_for_task,
+                               vim_util.get_moref(task_value, 'Task'))
+
+    def _wait_for_updates_versions(self, api_session):
+        return [call.kwargs['version'] for call in
+                api_session.vim.WaitForUpdatesEx.call_args_list]
+
+    def test_property_collector_thread_lifecycle(self):
+        # Without the option there is no thread
+        api_session = self._create_api_session(False)
+        self.assertIsNone(api_session._property_collector_thread)
+
+        # The thread is started in __init__ without a session; the
+        # property collector is only created once a task arrives.
+        api_session = self._create_property_collector_session(stop=False)
+        vim_obj = api_session.vim
+        thread = api_session._property_collector_thread
+        self.assertTrue(thread.is_alive())
+        self.assertTrue(thread.daemon)
+        self.assertFalse(vim_obj.CreatePropertyCollector.called)
+        self.assertFalse(api_session._property_collector_stopped.is_set())
+
+        # Stopping the thread while it monitors a task fails the task
+        vim_obj.WaitForUpdatesEx.return_value = None
+        pending_tasks = api_session._pending_tasks
+
+        def create_property_collector(pc):
+            pending_tasks.put(None)
+            return vim_util.get_moref('session[1]', 'PropertyCollector')
+
+        vim_obj.CreatePropertyCollector.side_effect = (
+            create_property_collector)
+        result = self._submit_wait_for_task(api_session, 'task-1')
+        ex = self.assertRaises(exceptions.VimException,
+                               result.result, timeout=10)
+        self.assertEqual("Property collector thread stopped.", str(ex))
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(api_session._property_collector_stopped.is_set())
+
+        # Tasks submitted afterwards fail instead of waiting forever
+        task = vim_util.get_moref('task-2', 'Task')
+        ex = self.assertRaises(exceptions.VimException,
+                               api_session.wait_for_task, task)
+        self.assertEqual("Property collector thread is not running.",
+                         str(ex))
+
+        # Stopping is idempotent
+        api_session._stop_property_collector_thread()
+        self.assertIsNone(api_session._property_collector_thread)
+        api_session._stop_property_collector_thread()
+
+        # Dropping the session stops its thread: it must not keep the
+        # session alive.
+        api_session = self._create_property_collector_session(stop=False)
+        thread = api_session._property_collector_thread
+        session_ref = weakref.ref(api_session)
+        del api_session
+        gc.collect()
+        self.assertIsNone(session_ref())
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
 
     @mock.patch.object(context, 'get_current')
     def test_wait_for_task_with_property_collector(self, mock_curr_ctx):
         ctx = mock.Mock()
         mock_curr_ctx.return_value = ctx
-        api_session = self._create_api_session(
-            False, use_property_collector_for_tasks=True)
-        task = vim_util.get_moref('task-1', 'Task')
-        task_info = mock.Mock(state='success')
+        api_session = self._create_property_collector_session()
+        vim_obj = api_session.vim
+        collector = vim_obj.CreatePropertyCollector.return_value
 
-        def resolve_task():
-            task_value, task_future, task_ctx = (
-                api_session._pending_tasks.get())
-            self.assertEqual('task-1', task_value)
-            self.assertEqual(ctx, task_ctx)
-            task_future.set_result(task_info)
+        # A task progressing to success: the version of the collector is
+        # carried over between calls, the filter is destroyed at the end.
+        success = self._make_task_info(
+            'success', progress=100,
+            queueTime=datetime(2016, 12, 6, 15, 29, 43, 79060),
+            completeTime=datetime(2016, 12, 6, 15, 29, 50, 79060))
+        vim_obj.WaitForUpdatesEx.side_effect = [
+            self._make_update_set(
+                '1', {'task-1': self._make_task_info('queued', progress=0)}),
+            self._make_update_set(
+                '2', {'task-1': self._make_task_info('running',
+                                                     progress=40)}),
+            None,
+            self._make_update_set('3', {'task-1': success}),
+        ]
+        result = self._submit_wait_for_task(api_session, 'task-1')
+        self.assertEqual(success, result.result(timeout=10))
 
-        t = threading.Thread(target=resolve_task)
-        t.start()
-        result = api_session._wait_for_task_with_property_collector(task)
-        t.join()
-        self.assertEqual(task_info, result)
+        vim_obj.CreatePropertyCollector.assert_called_once_with(
+            vim_obj.service_content.propertyCollector)
+        vim_obj.CreateFilter.assert_called_once_with(
+            collector, spec=mock.ANY, partialUpdates=False)
+        self.assertEqual(['', '1', '2', '2'],
+                         self._wait_for_updates_versions(api_session))
+        vim_obj.DestroyPropertyFilter.assert_called_once_with(
+            vim_obj.CreateFilter.return_value)
+        self.assertEqual(3, ctx.update_store.call_count)
+        mock_curr_ctx.assert_called_once()
 
-    def test_process_task_updates_success(self):
-        api_session = self._create_api_session(False)
-        task_future = futures.Future()
-        ctx = mock.Mock()
-        running_tasks = {'task-1': (task_future, ctx, mock.Mock())}
-
-        task_info = mock.Mock(state='success', name='TestTask',
-                              queueTime=datetime(2016, 12, 6, 15, 29, 43),
-                              completeTime=datetime(2016, 12, 6, 15, 29, 50))
-        api_session._process_task_updates(
-            self._make_update_set('task-1', task_info), running_tasks)
-
-        self.assertEqual(task_info, task_future.result())
-        self.assertEqual({}, running_tasks)
-        ctx.update_store.assert_called_once()
-
-    def test_process_task_updates_error(self):
-        api_session = self._create_api_session(False)
-        task_future = futures.Future()
-        ctx = mock.Mock()
-        running_tasks = {'task-1': (task_future, ctx, mock.Mock())}
-
+        # Several tasks are monitored at once with the same collector,
+        # here one succeeding and one failing in the same update.
+        filters = {
+            'task-2': vim_util.get_moref('session[2]', 'PropertyFilter'),
+            'task-3': vim_util.get_moref('session[3]', 'PropertyFilter'),
+        }
+        vim_obj.CreateFilter.side_effect = [filters['task-2'],
+                                            filters['task-3']]
         error = mock.Mock(localizedMessage="Error message")
         error.fault.__class__.__name__ = 'RuntimeFault'
-        task_info = mock.Mock(state='error', error=error)
+        task_infos = {'task-2': self._make_task_info('success'),
+                      'task-3': self._make_task_info('error', error=error)}
+
+        def wait_for_updates(pc, **kwargs):
+            # Both filters have to exist before the update for both arrives
+            if vim_obj.CreateFilter.call_count < 3:
+                return None
+            return self._make_update_set('4', task_infos)
+
+        vim_obj.WaitForUpdatesEx.side_effect = wait_for_updates
+        vim_obj.DestroyPropertyFilter.reset_mock()
+        result_2 = self._submit_wait_for_task(api_session, 'task-2')
+        result_3 = self._submit_wait_for_task(api_session, 'task-3')
+        self.assertEqual(task_infos['task-2'], result_2.result(timeout=10))
+        ex = self.assertRaises(exceptions.VimFaultException,
+                               result_3.result, timeout=10)
+        self.assertEqual(['RuntimeFault'], ex.fault_list)
+
+        # The collector is kept across tasks
+        vim_obj.CreatePropertyCollector.assert_called_once()
+        self.assertFalse(vim_obj.DestroyPropertyCollector.called)
+        self.assertEqual(3, vim_obj.CreateFilter.call_count)
+        self.assertCountEqual(
+            [mock.call(filters['task-2']), mock.call(filters['task-3'])],
+            vim_obj.DestroyPropertyFilter.call_args_list)
+        self.assertTrue(api_session._property_collector_thread.is_alive())
+
+    def test_wait_for_task_with_property_collector_failures(self):
+        api_session = self._create_property_collector_session()
+        vim_obj = api_session.vim
+        collectors = [
+            vim_util.get_moref('session[%d]' % i, 'PropertyCollector')
+            for i in range(1, 6)]
+        vim_obj.CreatePropertyCollector.side_effect = collectors
+
+        # A failing collector is created anew, along with the filter of
+        # the running task, and the version starts over.
+        success = self._make_task_info('success')
+        vim_obj.WaitForUpdatesEx.side_effect = [
+            self._make_update_set(
+                '1', {'task-1': self._make_task_info('running')}),
+            exceptions.VimException("Collector lost"),
+            self._make_update_set('1', {'task-1': success}),
+        ]
+        result = self._submit_wait_for_task(api_session, 'task-1')
+        self.assertEqual(success, result.result(timeout=10))
+
+        vim_obj.DestroyPropertyCollector.assert_called_once_with(
+            collectors[0])
+        self.assertEqual(2, vim_obj.CreatePropertyCollector.call_count)
+        self.assertEqual(
+            [mock.call(collectors[0], spec=mock.ANY, partialUpdates=False),
+             mock.call(collectors[1], spec=mock.ANY, partialUpdates=False)],
+            vim_obj.CreateFilter.call_args_list)
+        self.assertEqual(['', '1', ''],
+                         self._wait_for_updates_versions(api_session))
+
+        # A second consecutive failure fails the task with the error
+        vim_obj.WaitForUpdatesEx.side_effect = exceptions.VimException(
+            "Collector broken")
+        result = self._submit_wait_for_task(api_session, 'task-2')
+        ex = self.assertRaises(exceptions.VimException,
+                               result.result, timeout=10)
+        self.assertEqual("Collector broken", str(ex))
+        # collectors[1] failed, collectors[2] was created and failed too
+        self.assertEqual(3, vim_obj.CreatePropertyCollector.call_count)
+        self.assertEqual(3, vim_obj.DestroyPropertyCollector.call_count)
+
+        # A collector that cannot be created fails the task after a
+        # second attempt
+        vim_obj.CreatePropertyCollector.side_effect = (
+            exceptions.VimFaultException([exceptions.NO_PERMISSION],
+                                         "Not allowed"))
+        result = self._submit_wait_for_task(api_session, 'task-3')
+        self.assertRaises(exceptions.NoPermissionException,
+                          result.result, timeout=10)
+        self.assertEqual(5, vim_obj.CreatePropertyCollector.call_count)
+        self.assertEqual(3, vim_obj.DestroyPropertyCollector.call_count)
+
+        # A failing filter fails only its task. The collector is created
+        # anew, as the failure may be due to a re-created session.
+        vim_obj.CreatePropertyCollector.side_effect = collectors[3:]
+        task_filter = vim_util.get_moref('session[5]', 'PropertyFilter')
+        vim_obj.CreateFilter.side_effect = [
+            exceptions.VimFaultException(
+                [exceptions.MANAGED_OBJECT_NOT_FOUND], "No such task"),
+            task_filter]
+        vim_obj.WaitForUpdatesEx.side_effect = [
+            self._make_update_set('1', {'task-5': success})]
+        vim_obj.WaitForUpdatesEx.reset_mock()
+        result = self._submit_wait_for_task(api_session, 'task-4')
+        self.assertRaises(exceptions.ManagedObjectNotFoundException,
+                          result.result, timeout=10)
+        self.assertFalse(vim_obj.WaitForUpdatesEx.called)
+        vim_obj.DestroyPropertyCollector.assert_called_with(collectors[3])
+
+        # The thread keeps serving tasks after all of the above
+        result = self._submit_wait_for_task(api_session, 'task-5')
+        self.assertEqual(success, result.result(timeout=10))
+        vim_obj.CreateFilter.assert_called_with(
+            collectors[4], spec=mock.ANY, partialUpdates=False)
+        vim_obj.DestroyPropertyFilter.assert_called_with(task_filter)
+        self.assertTrue(api_session._property_collector_thread.is_alive())
+
+    def test_process_task_updates(self):
+        api_session = self._create_api_session(False)
+        vim_obj = api_session.vim
+        task_future = futures.Future()
+        ctx = mock.Mock()
+        task_filter = mock.Mock()
+        running_tasks = {'task-1': (task_future, ctx, task_filter)}
+
+        # Progress updates keep the task running
         api_session._process_task_updates(
-            self._make_update_set('task-1', task_info), running_tasks)
+            self._make_update_set(
+                '1', {'task-1': self._make_task_info('running',
+                                                     progress=40)}),
+            running_tasks)
+        self.assertFalse(task_future.done())
+        self.assertIn('task-1', running_tasks)
 
-        self.assertRaises(exceptions.VimFaultException, task_future.result)
+        # Updates of tasks not monitored (anymore) are ignored
+        api_session._process_task_updates(
+            self._make_update_set(
+                '2', {'task-2': self._make_task_info('success')}),
+            running_tasks)
+        self.assertFalse(task_future.done())
+
+        # Updates without an info change are ignored
+        update_set = self._make_update_set(
+            '3', {'task-1': self._make_task_info('success')})
+        update_set.filterSet[0].objectSet[0].changeSet[0].name = 'other'
+        api_session._process_task_updates(update_set, running_tasks)
+        self.assertFalse(task_future.done())
+
+        # Success delivers the task info; a filter that cannot be
+        # destroyed does not affect the task.
+        vim_obj.DestroyPropertyFilter.side_effect = exceptions.VimException(
+            "Cannot destroy")
+        success = self._make_task_info(
+            'success',
+            queueTime=datetime(2016, 12, 6, 15, 29, 43),
+            completeTime=datetime(2016, 12, 6, 15, 29, 50))
+        api_session._process_task_updates(
+            self._make_update_set('4', {'task-1': success}), running_tasks)
+        self.assertEqual(success, task_future.result(timeout=0))
         self.assertEqual({}, running_tasks)
-        ctx.update_store.assert_called_once()
+        self.assertEqual(2, ctx.update_store.call_count)
+        vim_obj.DestroyPropertyFilter.assert_called_once_with(task_filter)
 
-    def test_recreate_property_collector(self):
-        api_session = self._create_api_session(False)
-        old_pc = mock.Mock()
-        new_pc = mock.Mock()
-        new_filter = mock.Mock()
-        running_tasks = {
-            'task-1': (futures.Future(), mock.Mock(), mock.Mock()),
-            'task-2': (futures.Future(), mock.Mock(), mock.Mock()),
-        }
-        api_session.vim.CreatePropertyCollector.return_value = new_pc
-        api_session.vim.CreateFilter.return_value = new_filter
-
-        result_pc, result_version = api_session._recreate_property_collector(
-            old_pc, running_tasks)
-
-        self.assertEqual(new_pc, result_pc)
-        self.assertEqual("", result_version)
-        api_session.vim.DestroyPropertyCollector.assert_called_once_with(
-            old_pc)
-        self.assertEqual(2, len(running_tasks))
-
-    def test_stop_property_collector_thread(self):
-        api_session = self._create_api_session(False)
-        thread = mock.Mock()
-        api_session._property_collector_thread = thread
-
-        api_session._stop_property_collector_thread()
-
-        self.assertIsNone(api_session._pending_tasks.get_nowait())
-        thread.join.assert_called_once()
-        self.assertIsNone(api_session._property_collector_thread)
+        # Errors are translated to the well-known exceptions, unknown
+        # faults to VimFaultException. No context is fine, too.
+        faults = dict(exceptions._fault_classes_registry)
+        faults.update({'NotAFile': exceptions.VimFaultException,
+                       'RuntimeFault': exceptions.VimFaultException})
+        for fault, expected_exception in faults.items():
+            task_future = futures.Future()
+            running_tasks = {'task-1': (task_future, None, mock.Mock())}
+            error = mock.Mock(localizedMessage="Error message")
+            error.fault.__class__.__name__ = fault
+            api_session._process_task_updates(
+                self._make_update_set(
+                    '5', {'task-1': self._make_task_info('error',
+                                                         error=error)}),
+                running_tasks)
+            self.assertRaises(expected_exception, task_future.result,
+                              timeout=0)
+            self.assertEqual({}, running_tasks)
